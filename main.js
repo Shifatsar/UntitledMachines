@@ -1,8 +1,71 @@
 import { LEVELS } from './levels.js';
 const board = document.getElementById('board-inner');
-const gameArea = document.getElementById('game-area');
+const gameArea = document.getElementById('game-viewport');
 const paletteItems = document.querySelectorAll('.pipe-item');
 const GRID_SIZE = 50; // Updated grid size
+const PLAY_ROTATABLE_TYPES = ['straight', 'curve', 'tshape', 'cross'];
+const MOUSE_NPC_TYPE = 'mouse-npc';
+const MOUSE_NPC_MOVE_INTERVAL_MS = 520;
+const MOUSE_NPC_MOVE_VARIANCE_MS = 380;
+const MOUSE_NPC_STEP_MS = 220;
+const MOUSE_NPC_FRAME_MS = 130;
+const MOUSE_DIRECTION_TO_ROTATION = { down: 0, left: 90, up: 180, right: 270 };
+const ROTATION_TO_MOUSE_DIRECTION = { 0: 'down', 90: 'left', 180: 'up', 270: 'right' };
+const NPC_BLOCKER_TYPES = new Set([
+    'wall', 'wall-wood', 'wall-cement', 'wall-straw',
+    'door', 'door-metal', 'rock', 'pot', 'pond-large',
+    'broken-bulb', 'broken-wires', 'fallen-light'
+]);
+
+// --- Audio SFX Engine ---
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+const SFX = {
+    playBlip() {
+        this.playTone(600, 'square', 0.1, 0.05);
+    },
+    playClick() {
+        this.playTone(200, 'sine', 0.06, 0.3, 1);
+    },
+    playScan() {
+        this.playGlissando(200, 800, 1.0);
+    },
+    playSqueak() {
+        // Double-chirp logic
+        this.playTone(1500, 'triangle', 0.05, 0.05, 1);
+        setTimeout(() => {
+            this.playTone(1800, 'triangle', 0.04, 0.04, 1);
+        }, 80);
+    },
+    playTone(freq, type, duration, volume, decay = 0) {
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        if (decay > 0) osc.frequency.exponentialRampToValueAtTime(10, audioCtx.currentTime + duration);
+        gain.gain.setValueAtTime(volume, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + duration);
+    },
+    playGlissando(startFreq, endFreq, duration) {
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(startFreq, audioCtx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(endFreq, audioCtx.currentTime + duration);
+        gain.gain.setValueAtTime(0.05, audioCtx.currentTime);
+        gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + duration);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + duration);
+    }
+};
 
 // UI Elements
 const mainMenu = document.getElementById('main-menu');
@@ -29,19 +92,12 @@ let offsetY = 0;
 let selectedPiece = null;
 let gameMode = 'editor'; // 'editor' or 'play'
 let currentLevel = 1;
+let mouseNpcStates = new WeakMap();
 
 // UI Elements (continued)
 const creditsMenu = document.getElementById('credits-menu');
 const btnCreditsBack = document.getElementById('btn-credits-back');
 
-// Main Menu Logic
-document.getElementById('btn-build').addEventListener('click', () => {
-    document.getElementById('main-menu').classList.remove('active');
-    document.getElementById('editor-ui').classList.remove('hidden');
-    document.querySelector('.sidebar').style.display = 'block';
-    gameMode = 'editor';
-    checkSaves(); // Ensure dropdown is populated
-});
 
 document.getElementById('bg-select').addEventListener('change', (e) => {
     document.getElementById('board-inner').className = `bg-${e.target.value}`;
@@ -74,13 +130,13 @@ function checkSaves() {
             levelsSet.add(key.replace('level_', ''));
         }
     }
-    
+
     const levels = Array.from(levelsSet);
     if (levels.length > 0) hasSaves = true;
 
     // Sort levels numerically
     levels.sort((a, b) => parseInt(a) - parseInt(b));
-    
+
     // Populate editor level buttons (1-10)
     if (editorLevelButtons) {
         editorLevelButtons.innerHTML = '';
@@ -88,15 +144,15 @@ function checkSaves() {
             const btn = document.createElement('button');
             btn.className = 'editor-lvl-btn';
             btn.textContent = i;
-            
+
             const isLocal = localStorage.getItem(`level_${i}`);
             const isCode = LEVELS && LEVELS[i];
             if (isLocal || isCode) btn.classList.add('has-data');
-            
+
             if (parseInt(levelInput.value) === i) {
                 btn.classList.add('active');
             }
-            
+
             btn.addEventListener('click', () => {
                 levelInput.value = i;
                 if (!loadLevel(i)) {
@@ -104,11 +160,11 @@ function checkSaves() {
                 }
                 checkSaves(); // refresh active state
             });
-            
+
             editorLevelButtons.appendChild(btn);
         }
     }
-    
+
     if (hasSaves) {
         btnStart.removeAttribute('disabled');
         btnStart.textContent = "Start Adventure";
@@ -151,7 +207,7 @@ function createNewLevel() {
     board.innerHTML = '';
     document.getElementById('bg-select').value = 'concrete';
     document.getElementById('board-inner').className = 'bg-concrete show-grid';
-    
+
     const wallTemplate = document.querySelector('.pipe-item[data-type="wall"]');
     const addWall = (x, y) => {
         const clone = wallTemplate.cloneNode(true);
@@ -169,6 +225,8 @@ function createNewLevel() {
         addWall(0, y * GRID_SIZE);
         addWall(24 * GRID_SIZE, y * GRID_SIZE);
     }
+    if (document.getElementById('backlight-holes')) document.getElementById('backlight-holes').innerHTML = '';
+    updateCircuit();
 }
 
 btnBackMenu.addEventListener('click', () => {
@@ -185,10 +243,10 @@ btnSave.addEventListener('click', () => {
         alert("Please enter a level number.");
         return;
     }
-    
+
     const pieces = document.querySelectorAll('.placed-pipe');
     const levelData = [];
-    
+
     pieces.forEach(p => {
         levelData.push({
             type: p.dataset.type,
@@ -199,12 +257,12 @@ btnSave.addEventListener('click', () => {
             state: p.dataset.state || null
         });
     });
-    
+
     const bg = document.getElementById('bg-select').value || 'concrete';
     const saveData = { bg: bg, gridSize: GRID_SIZE, pieces: levelData };
-    
+
     localStorage.setItem(`level_${levelNum}`, JSON.stringify(saveData));
-    
+
     // Visual feedback
     const originalText = btnSave.textContent;
     btnSave.textContent = "Saved!";
@@ -213,21 +271,21 @@ btnSave.addEventListener('click', () => {
         btnSave.textContent = originalText;
         btnSave.style.background = "";
     }, 1500);
-    
+
     checkSaves();
 });
 
 // --- Level Loading & Game Mode ---
 
-let player = { x: 100, y: 100, el: null, heldItem: null, facing: 1, direction: 'down' };
-const keys = {};
+// let player = { x: 100, y: 100, el: null, heldItem: null, facing: 1, direction: 'down' };
+// const keys = {};
 
-window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
-window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+// window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+// window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
 
 function loadLevel(levelNum) {
     let data = null;
-    
+
     // Check localStorage first for "drafts"
     const localData = localStorage.getItem(`level_${levelNum}`);
     if (localData) {
@@ -240,12 +298,12 @@ function loadLevel(levelNum) {
     if (!data) {
         return false;
     }
-    
+
     const parsed = JSON.parse(data);
     let levelData = [];
     let bg = 'concrete';
     let isOldGrid = false;
-    
+
     if (Array.isArray(parsed)) {
         levelData = parsed;
         isOldGrid = true;
@@ -256,26 +314,26 @@ function loadLevel(levelNum) {
             isOldGrid = true;
         }
     }
-    
+
     if (isOldGrid) {
         levelData.forEach(item => {
             item.x = Math.round(item.x / 40) * 50;
             item.y = Math.round(item.y / 40) * 50;
         });
     }
-    
+
     document.getElementById('board-inner').className = `bg-${bg}`;
     if (document.getElementById('toggle-grid').checked && gameMode === 'editor') {
         document.getElementById('board-inner').classList.add('show-grid');
     }
     document.getElementById('bg-select').value = bg;
-    
+
     board.innerHTML = '';
-    
+
     levelData.forEach(item => {
         const template = document.querySelector(`.pipe-item[data-type="${item.type}"]`);
         if (!template) return;
-        
+
         const clone = template.cloneNode(true);
         clone.className = 'placed-pipe';
         clone.style.left = `${item.x}px`;
@@ -283,9 +341,9 @@ function loadLevel(levelNum) {
         if (item.rotation) clone.dataset.rotation = item.rotation;
         if (item.flip) clone.dataset.flip = item.flip;
         if (item.state) clone.dataset.state = item.state;
-        
-        clone.style.transform = `rotate(${item.rotation || 0}deg) scaleX(${item.flip || 1})`;
-        
+
+        applyPieceTransform(clone);
+
         if (item.type === 'switch') {
             const bg = clone.querySelector('.switch-bg');
             const lever = clone.querySelector('.switch-lever');
@@ -297,19 +355,30 @@ function loadLevel(levelNum) {
                 lever.setAttribute('y', '50');
             }
         }
-        
+
         board.appendChild(clone);
     });
-    
+
+    if (document.getElementById('backlight-holes')) document.getElementById('backlight-holes').innerHTML = '';
     updateWires();
     return true;
 }
 
 function startGameMode() {
     gameMode = 'play';
+    isInitialFocus = true;
     document.getElementById('board-inner').classList.remove('show-grid');
-    
-    // Find bottom door for spawn
+    initializeMouseNpcs();
+
+    // Create Visibility Mask if it doesn't exist
+    if (!document.getElementById('visibility-mask')) {
+        const mask = document.createElement('div');
+        mask.id = 'visibility-mask';
+        gameArea.appendChild(mask); // Put it in gameArea
+    }
+    document.getElementById('visibility-mask').classList.remove('hidden');
+
+    // Find bottom door for spawn position (mouse start)
     const doors = Array.from(document.querySelectorAll('.placed-pipe')).filter(p => p.dataset.type === 'door' || p.dataset.type === 'door-metal');
     let entranceDoor = null;
     if (doors.length > 0) {
@@ -317,46 +386,16 @@ function startGameMode() {
         entranceDoor = doors[0];
     }
 
-    player.x = entranceDoor ? parseFloat(entranceDoor.style.left) : 100;
-    player.y = entranceDoor ? parseFloat(entranceDoor.style.top) : 100;
-    
-    player.el = document.createElement('div');
-    player.el.id = 'player';
-    player.el.style.width = `${GRID_SIZE}px`;
-    player.el.style.height = `${GRID_SIZE}px`;
-    player.el.style.position = 'absolute';
-    player.el.style.left = `${player.x}px`;
-    player.el.style.top = `${player.y}px`;
-    player.el.style.backgroundImage = `url('assets/soldier_idle.png')`;
-    player.el.style.backgroundSize = 'contain';
-    player.el.style.backgroundRepeat = 'no-repeat';
-    player.el.style.backgroundPosition = 'center';
-    player.el.style.zIndex = '200';
-    player.el.style.pointerEvents = 'none';
-    board.appendChild(player.el);
-    
     if (entranceDoor) {
         entranceDoor.dataset.isEntrance = "true";
-        // Remove any other objects at the same spot
-        const ex = parseFloat(entranceDoor.style.left);
-        const ey = parseFloat(entranceDoor.style.top);
-        Array.from(document.querySelectorAll('.placed-pipe')).forEach(p => {
-            if (p !== entranceDoor && 
-                Math.abs(parseFloat(p.style.left) - ex) < 5 && 
-                Math.abs(parseFloat(p.style.top) - ey) < 5) {
-                p.remove();
-            }
-        });
-
         entranceDoor.classList.add('door-opening');
 
-        // Auto-move player up one square after a small delay
-        setTimeout(() => {
-            player.y -= GRID_SIZE;
-            player.el.style.top = `${player.y}px`;
-            player.direction = 'up';
-            player.el.style.backgroundImage = `url('assets/soldier_back.png')`;
-        }, 500);
+        // Initialize mouse position at entrance door center
+        const rect = board.getBoundingClientRect();
+        mousePos.x = parseFloat(entranceDoor.style.left) + GRID_SIZE / 2;
+        mousePos.y = parseFloat(entranceDoor.style.top) + GRID_SIZE / 2;
+        mousePos.clientX = rect.left + mousePos.x;
+        mousePos.clientY = rect.top + mousePos.y;
 
         setTimeout(() => {
             entranceDoor.classList.remove('door-opening');
@@ -366,40 +405,28 @@ function startGameMode() {
             }, 600);
         }, 1000);
     }
-    
-    // Also cleanup the exit door spot
-    const exitDoor = doors.find(d => d !== entranceDoor);
-    if (exitDoor) {
-        const ex = parseFloat(exitDoor.style.left);
-        const ey = parseFloat(exitDoor.style.top);
-        Array.from(document.querySelectorAll('.placed-pipe')).forEach(p => {
-            if (p !== exitDoor && 
-                Math.abs(parseFloat(p.style.left) - ex) < 5 && 
-                Math.abs(parseFloat(p.style.top) - ey) < 5) {
-                p.remove();
-            }
-        });
-    }
-    
+
+    // Note: gameLoop now handles mouse-based visibility and win condition
     requestAnimationFrame(gameLoop);
 }
 
 document.getElementById('btn-exit-game').addEventListener('click', () => {
     gameMode = 'editor';
     board.innerHTML = '';
-    if (player.el) player.el.remove();
-    player.heldItem = null;
-    
+    // if (player.el) player.el.remove();
+    // player.heldItem = null;
+
     document.getElementById('btn-exit-game').classList.add('hidden');
+    document.getElementById('visibility-mask')?.classList.add('hidden');
     document.getElementById('editor-ui').classList.add('hidden');
     document.querySelector('.sidebar').style.display = 'block';
     document.getElementById('main-menu').classList.remove('active');
     document.getElementById('main-menu').classList.remove('hidden');
-    
+
     if (document.getElementById('toggle-grid').checked) {
         document.getElementById('board-inner').classList.add('show-grid');
     }
-    
+
     checkSaves();
 });
 
@@ -409,9 +436,9 @@ if (btnClearBoard) {
             board.innerHTML = '';
             document.getElementById('bg-select').value = 'concrete';
             document.getElementById('board-inner').className = 'bg-concrete show-grid';
-            
+
             const wallTemplate = document.querySelector('.pipe-item[data-type="wall"]');
-            
+
             const addWall = (x, y) => {
                 const clone = wallTemplate.cloneNode(true);
                 clone.className = 'placed-pipe';
@@ -433,23 +460,42 @@ if (btnClearBoard) {
 }
 
 btnStart.addEventListener('click', () => {
+    SFX.playBlip();
     currentLevel = 1;
     if (loadLevel(currentLevel)) {
         mainMenu.classList.add('hidden');
         editorUI.classList.remove('hidden');
         document.querySelector('.sidebar').style.display = 'none';
         document.getElementById('btn-exit-game').classList.remove('hidden');
+        
+        // Show Splash for Level 1
+        const splash = document.getElementById('level-splash');
+        const splashText = document.getElementById('splash-level-text');
+        splashText.innerText = `LEVEL ${currentLevel}`;
+        splash.classList.remove('hidden');
+        setTimeout(() => {
+            splash.classList.add('active');
+            SFX.playScan();
+        }, 10);
+        
         startGameMode();
+        
+        setTimeout(() => {
+            splash.classList.remove('active');
+            setTimeout(() => splash.classList.add('hidden'), 600);
+        }, 1200);
     } else {
         alert("Level 1 not found! Please build it in Level Maker first.");
     }
 });
 
 btnLevelSelect.addEventListener('click', () => {
+    SFX.playBlip();
     openLevelSelect();
 });
 
 btnLevelBack.addEventListener('click', () => {
+    SFX.playBlip();
     levelSelectMenu.classList.add('hidden');
     mainMenu.classList.remove('hidden');
 });
@@ -458,16 +504,16 @@ function openLevelSelect() {
     mainMenu.classList.add('hidden');
     levelSelectMenu.classList.remove('hidden');
     levelGrid.innerHTML = '';
-    
+
     const highest = parseInt(localStorage.getItem('highest_unlocked_level')) || 1;
-    
+
     for (let i = 1; i <= 10; i++) {
         const slot = document.createElement('div');
         slot.className = 'level-slot';
         slot.textContent = i;
-        
+
         const hasData = localStorage.getItem(`level_${i}`) || (LEVELS && LEVELS[i]);
-        
+
         if (!hasData) {
             slot.classList.add('missing');
         } else if (i > highest) {
@@ -497,104 +543,625 @@ if (btnCreditsBack) {
     });
 }
 
-function checkCollision(newX, newY) {
-    const pieces = Array.from(document.querySelectorAll('.placed-pipe'));
-    // Electrical stuff (except cables) blocks movement too
-    const colliders = ['wall', 'wall-wood', 'wall-cement', 'wall-straw', 'rock', 'pot', 'door', 'door-metal'];
-    
-    // Extremely small collision box (10x10) to ensure player never gets stuck in doorways
-    const pRect = { left: newX + 20, right: newX + 30, top: newY + 20, bottom: newY + 30 };
-    
-    for (let p of pieces) {
-        if (p === player.heldItem) continue; // Do not collide with the item you are holding!
-        if (colliders.includes(p.dataset.type)) {
-            // Ignore door that is unlocking/opening/closing
-            if (p.dataset.unlocked === "true" || 
-                p.classList.contains('door-opening') || 
-                p.classList.contains('door-unlocking') ||
-                p.classList.contains('door-closing')) continue;
 
-            let px = parseFloat(p.style.left) || 0;
-            let py = parseFloat(p.style.top) || 0;
-            let pWidth = (parseInt(p.dataset.width) || 1) * GRID_SIZE;
-            let pHeight = (parseInt(p.dataset.height) || 1) * GRID_SIZE;
-            let pR = { left: px, right: px + pWidth, top: py, bottom: py + pHeight };
-            
-            if (pRect.left < pR.right && pRect.right > pR.left && pRect.top < pR.bottom && pRect.bottom > pR.top) {
-                return true;
+let mousePos = { x: 0, y: 0, clientX: 0, clientY: 0 };
+let isInitialFocus = true;
+const LIGHT_OCCLUDER_TYPES = new Set([
+    'wall',
+    'wall-wood',
+    'wall-cement',
+    'wall-straw',
+    'door',
+    'door-metal'
+]);
+const BULB_LIGHT_DIAMETER_TILES = 10;
+const BULB_LIGHT_RADIUS_TILES = BULB_LIGHT_DIAMETER_TILES / 2;
+const MOUSE_LIGHT_RADIUS_TILES = 2;
+const LIGHT_SUBDIVISIONS = 2;
+const LIGHT_SUBCELL_SIZE = GRID_SIZE / LIGHT_SUBDIVISIONS;
+const BULB_LIGHT_RADIUS_SUBCELLS = BULB_LIGHT_RADIUS_TILES * LIGHT_SUBDIVISIONS;
+const MOUSE_LIGHT_RADIUS_SUBCELLS = MOUSE_LIGHT_RADIUS_TILES * LIGHT_SUBDIVISIONS;
+
+function getPieceGridPosition(piece) {
+    return {
+        x: Math.round((parseFloat(piece.style.left) || 0) / GRID_SIZE),
+        y: Math.round((parseFloat(piece.style.top) || 0) / GRID_SIZE)
+    };
+}
+
+function normalizeRotation(rotation) {
+    let value = rotation % 360;
+    if (value < 0) value += 360;
+    return value;
+}
+
+function getMouseDirectionFromRotation(rotation) {
+    return ROTATION_TO_MOUSE_DIRECTION[normalizeRotation(rotation)] || 'down';
+}
+
+let lastRotateTime = 0;
+function rotatePiece(piece) {
+    const now = Date.now();
+    if (now - lastRotateTime < 250) return; // Prevent double-triggering
+    lastRotateTime = now;
+
+    SFX.playClick();
+    let rotation = parseInt(piece.dataset.rotation) || 0;
+    rotation += 90;
+    piece.dataset.rotation = rotation;
+    applyPieceTransform(piece);
+    updateWires();
+}
+
+function updateMouseNpcSprite(piece, direction = 'down', frame = 0, action = 'walk') {
+    const sprite = piece.querySelector('.mouse-npc-sprite');
+    if (!sprite) return;
+
+    const rowMap = { up: 0, down: 1, left: 2, right: 3, munch: 4 };
+    const row = action === 'munch' ? rowMap.munch : rowMap[direction] ?? rowMap.down;
+    const clampedFrame = ((frame % 4) + 4) % 4;
+
+    // Precise clipping for split sprites
+    const fileNameMap = { up: 'mouse_up.png', down: 'mouse_down.png', left: 'mouse_left.png', right: 'mouse_right.png', munch: 'mouse_munch.png' };
+    const actionKey = action === 'munch' ? 'munch' : direction;
+    const fileName = fileNameMap[actionKey] ?? 'mouse_down.png';
+    
+    // Exact Width Map for laser-precision slicing
+    const fileWidths = { up: 102, down: 107, left: 172, right: 173, munch: 134 };
+    const totalWidth = fileWidths[actionKey] || 107;
+    const frameWidth = totalWidth / 4;
+    const posX = (clampedFrame % 4) * frameWidth;
+
+    sprite.style.width = `${frameWidth}px`;
+    sprite.style.height = `52px`; // Height is 52px in your files
+    sprite.style.backgroundImage = `url('${fileName}')`;
+    sprite.style.backgroundSize = "auto"; // Original pixels only
+    sprite.style.backgroundPosition = `-${posX}px 0px`;
+    sprite.style.backgroundRepeat = "no-repeat";
+    
+    // Center the clipped sprite within the 50px tile
+    sprite.style.position = "absolute";
+    sprite.style.left = `${(GRID_SIZE - frameWidth) / 2}px`;
+    sprite.style.top = `${(GRID_SIZE - 52) / 2}px`;
+    
+    sprite.style.mixBlendMode = "normal";
+    piece.dataset.npcDir = direction;
+    piece.dataset.npcFrame = clampedFrame;
+    piece.dataset.npcAction = action;
+}
+
+function applyPieceTransform(piece) {
+    const rotation = normalizeRotation(parseInt(piece.dataset.rotation) || 0);
+    const flip = parseInt(piece.dataset.flip) || 1;
+
+    if (piece.dataset.type === MOUSE_NPC_TYPE) {
+        piece.style.transform = '';
+        updateMouseNpcSprite(
+            piece,
+            piece.dataset.npcDir || getMouseDirectionFromRotation(rotation),
+            parseInt(piece.dataset.npcFrame) || 0,
+            piece.dataset.npcAction || 'walk'
+        );
+        return;
+    }
+
+    piece.style.transform = `rotate(${parseInt(piece.dataset.rotation) || 0}deg) scaleX(${flip})`;
+}
+
+function ensureSparkOverlay(exposedElement) {
+    const baseDir = exposedElement.getAttribute('data-dir');
+    if (!baseDir || !exposedElement.parentNode) return null;
+
+    const parent = exposedElement.parentNode;
+    let spark = parent.querySelector(`.wire-spark[data-dir="${baseDir}"]`);
+    if (spark) return spark;
+
+    spark = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    spark.setAttribute('href', '#wire-sparks');
+    spark.setAttribute('class', 'wire-spark');
+    spark.setAttribute('data-dir', baseDir);
+
+    const transform = exposedElement.getAttribute('transform');
+    if (transform) {
+        spark.setAttribute('transform', transform);
+    }
+
+    exposedElement.insertAdjacentElement('afterend', spark);
+    return spark;
+}
+
+function shuffleArray(values) {
+    const copy = [...values];
+    for (let i = copy.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [copy[i], copy[j]] = [copy[j], copy[i]];
+    }
+    return copy;
+}
+
+function initializeMouseNpcs(now = performance.now()) {
+    mouseNpcStates = new WeakMap();
+
+    Array.from(document.querySelectorAll(`.placed-pipe[data-type="${MOUSE_NPC_TYPE}"]`)).forEach(piece => {
+        piece.style.transition = `left ${MOUSE_NPC_STEP_MS}ms linear, top ${MOUSE_NPC_STEP_MS}ms linear`;
+        const direction = getMouseDirectionFromRotation(parseInt(piece.dataset.rotation) || 0);
+        updateMouseNpcSprite(piece, direction, 0, 'munch');
+        mouseNpcStates.set(piece, {
+            direction,
+            nextMoveAt: now + 250 + Math.random() * 500,
+            movingUntil: now,
+            lastFrameAt: now,
+            frame: 0
+        });
+    });
+}
+
+function canMouseMove(piece, dir) {
+    const directionVectors = {
+        up: { dx: 0, dy: -1 },
+        down: { dx: 0, dy: 1 },
+        left: { dx: -1, dy: 0 },
+        right: { dx: 1, dy: 0 }
+    };
+    const vector = directionVectors[dir];
+    if (!vector) return false;
+
+    const boardRect = board.getBoundingClientRect();
+    const maxX = Math.max(0, Math.round(boardRect.width / GRID_SIZE) - 1);
+    const maxY = Math.max(0, Math.round(boardRect.height / GRID_SIZE) - 1);
+    
+    const { x, y } = getPieceGridPosition(piece);
+    const nextX = x + vector.dx;
+    const nextY = y + vector.dy;
+
+    if (nextX < 0 || nextY < 0 || nextX > maxX || nextY > maxY) return false;
+    
+    const blockerMap = getNpcBlockerMap(piece);
+    if (blockerMap.has(`${nextX},${nextY}`)) return false;
+
+    return true;
+}
+
+function getNpcBlockerMap(ignorePiece) {
+    const blockers = new Set();
+    Array.from(document.querySelectorAll('.placed-pipe')).forEach(piece => {
+        if (piece === ignorePiece) return;
+        if (piece.dataset.type === MOUSE_NPC_TYPE || NPC_BLOCKER_TYPES.has(piece.dataset.type)) {
+            const { x, y } = getPieceGridPosition(piece);
+            blockers.add(`${x},${y}`);
+        }
+    });
+    return blockers;
+}
+
+function chooseMouseNpcDirection(piece, currentDirection) {
+    const boardRect = board.getBoundingClientRect();
+    const maxX = Math.max(0, Math.round(boardRect.width / GRID_SIZE) - 1);
+    const maxY = Math.max(0, Math.round(boardRect.height / GRID_SIZE) - 1);
+    const directionVectors = {
+        up: { name: 'up', dx: 0, dy: -1 },
+        down: { name: 'down', dx: 0, dy: 1 },
+        left: { name: 'left', dx: -1, dy: 0 },
+        right: { name: 'right', dx: 1, dy: 0 }
+    };
+    const directions = [
+        directionVectors[currentDirection] || directionVectors.down,
+        ...shuffleArray([
+            directionVectors.up,
+            directionVectors.down,
+            directionVectors.left,
+            directionVectors.right
+        ].filter(direction => direction.name !== currentDirection))
+    ];
+    const blockerMap = getNpcBlockerMap(piece);
+    const { x, y } = getPieceGridPosition(piece);
+
+    for (const direction of directions) {
+        const nextX = x + direction.dx;
+        const nextY = y + direction.dy;
+        if (nextX < 0 || nextY < 0 || nextX > maxX || nextY > maxY) continue;
+        if (blockerMap.has(`${nextX},${nextY}`)) continue;
+
+        return direction;
+    }
+
+    return null;
+}
+
+
+function updateMouseNpcs(timestamp) {
+    if (gameMode !== 'play') return;
+
+    const currentLevelData = LEVELS[currentLevel] || {};
+    const maxInteractions = currentLevelData.mouseInteractions ?? 0;
+
+    Array.from(document.querySelectorAll(`.placed-pipe[data-type="${MOUSE_NPC_TYPE}"]`)).forEach(piece => {
+        let state = mouseNpcStates.get(piece);
+        if (!state) {
+            const direction = getMouseDirectionFromRotation(parseInt(piece.dataset.rotation) || 0);
+            state = {
+                direction,
+                nextMoveAt: timestamp + 250 + Math.random() * 500,
+                movingUntil: timestamp,
+                lastFrameAt: timestamp,
+                frame: 0,
+                stepsRemaining: 0,
+                interactionsLeft: maxInteractions,
+                lastSabotageAt: 0
+            };
+            mouseNpcStates.set(piece, state);
+        }
+
+        const gridPos = getPieceGridPosition(piece);
+
+        // Sabotage Logic: Sniff out powered wires if we have interactions left
+        if (state.interactionsLeft > 0 && timestamp - (state.lastSabotageAt || 0) > 8000) {
+            const tilesOnMe = Array.from(document.querySelectorAll('.placed-pipe')).filter(p => {
+                if (p === piece) return false;
+                const pPos = getPieceGridPosition(p);
+                return pPos.x === gridPos.x && pPos.y === gridPos.y;
+            });
+
+            const wire = tilesOnMe.find(p => PLAY_ROTATABLE_TYPES.includes(p.dataset.type));
+            if (wire) {
+                const isPowered = wire.classList.contains('powered');
+                // Sabotage if it's powered (disturbing the circuit!)
+                if (isPowered || Math.random() < 0.02) {
+                    rotatePiece(wire);
+                    state.interactionsLeft--;
+                    state.lastSabotageAt = timestamp;
+                    state.movingUntil = timestamp; // Stop to munch/celebrate
+                    state.nextMoveAt = timestamp + 1500; 
+                    state.stepsRemaining = 0;
+                    return;
+                }
+            }
+        }
+
+        if (timestamp >= state.nextMoveAt) {
+            // Fluid Movement: Commit to a few steps in the same direction
+            if (state.stepsRemaining <= 0) {
+                const nextDirection = chooseMouseNpcDirection(piece, state.direction);
+                if (nextDirection) {
+                    state.direction = nextDirection.name;
+                    state.stepsRemaining = 2 + Math.floor(Math.random() * 5); // Walk 2-6 tiles
+                } else {
+                    // Idle/Munch if stuck
+                    state.nextMoveAt = timestamp + 1000 + Math.random() * 2000;
+                    return;
+                }
+            }
+
+            const dirVec = {
+                up: { dx: 0, dy: -1 },
+                down: { dx: 0, dy: 1 },
+                left: { dx: -1, dy: 0 },
+                right: { dx: 1, dy: 0 }
+            }[state.direction];
+
+            if (canMouseMove(piece, state.direction)) {
+                const { x, y } = getPieceGridPosition(piece);
+                piece.style.left = `${(x + dirVec.dx) * GRID_SIZE}px`;
+                piece.style.top = `${(y + dirVec.dy) * GRID_SIZE}px`;
+                state.movingUntil = timestamp + MOUSE_NPC_STEP_MS;
+                state.nextMoveAt = timestamp + MOUSE_NPC_STEP_MS;
+                state.stepsRemaining--;
+                piece.dataset.rotation = MOUSE_DIRECTION_TO_ROTATION[state.direction];
+            } else {
+                state.stepsRemaining = 0; // Hit something
+                state.nextMoveAt = timestamp + 500;
+            }
+        }
+
+        const isMoving = timestamp < state.movingUntil;
+        const action = isMoving ? 'walk' : 'munch';
+        if (timestamp - state.lastFrameAt >= MOUSE_NPC_FRAME_MS) {
+            state.frame = (state.frame + 1) % 4;
+            state.lastFrameAt = timestamp;
+        }
+
+        updateMouseNpcSprite(piece, state.direction, state.frame, action);
+    });
+}
+
+function buildLightOccluderMap(pieces) {
+    const occluders = new Set();
+
+    pieces.forEach(piece => {
+        if (!LIGHT_OCCLUDER_TYPES.has(piece.dataset.type)) return;
+
+        const { x, y } = getPieceGridPosition(piece);
+        for (let sx = 0; sx < LIGHT_SUBDIVISIONS; sx++) {
+            for (let sy = 0; sy < LIGHT_SUBDIVISIONS; sy++) {
+                occluders.add(`${x * LIGHT_SUBDIVISIONS + sx},${y * LIGHT_SUBDIVISIONS + sy}`);
+            }
+        }
+    });
+
+    return occluders;
+}
+
+function getSvgDefsRoot() {
+    return document.querySelector('body > svg defs');
+}
+
+function hasLightLineOfSight(startX, startY, targetX, targetY, occluderMap, allowedTargetKey = null) {
+    const deltaX = targetX - startX;
+    const deltaY = targetY - startY;
+    const steps = Math.max(1, Math.ceil(Math.max(Math.abs(deltaX), Math.abs(deltaY)) * 4));
+
+    for (let step = 1; step < steps; step++) {
+        const t = step / steps;
+        const sampleX = startX + deltaX * t;
+        const sampleY = startY + deltaY * t;
+        const cellX = Math.floor(sampleX);
+        const cellY = Math.floor(sampleY);
+
+        const cellKey = `${cellX},${cellY}`;
+        if (occluderMap.has(cellKey) && cellKey !== allowedTargetKey) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function clearDynamicLightDefs() {
+    const defsRoot = getSvgDefsRoot();
+    if (!defsRoot) return;
+
+    defsRoot.querySelectorAll('[data-dynamic-light="true"]').forEach(node => node.remove());
+}
+
+function buildLitSubcells(sourceSubX, sourceSubY, radiusSubcells, boardWidthSubcells, boardHeightSubcells, occluderMap) {
+    const openCells = [];
+    const surfaceCells = [];
+
+    for (let gx = Math.max(0, Math.floor(sourceSubX - radiusSubcells - 1)); gx <= Math.min(boardWidthSubcells - 1, Math.ceil(sourceSubX + radiusSubcells)); gx++) {
+        for (let gy = Math.max(0, Math.floor(sourceSubY - radiusSubcells - 1)); gy <= Math.min(boardHeightSubcells - 1, Math.ceil(sourceSubY + radiusSubcells)); gy++) {
+            const distance = Math.hypot((gx + 0.5) - sourceSubX, (gy + 0.5) - sourceSubY);
+            if (distance > radiusSubcells + 0.4) continue;
+            const targetKey = `${gx},${gy}`;
+            const isSurfaceCell = occluderMap.has(targetKey);
+            if (!hasLightLineOfSight(sourceSubX, sourceSubY, gx + 0.5, gy + 0.5, occluderMap, isSurfaceCell ? targetKey : null)) continue;
+
+            const cell = { x: gx, y: gy, distance };
+            if (isSurfaceCell) {
+                surfaceCells.push(cell);
+            } else {
+                openCells.push(cell);
             }
         }
     }
-    return false;
+
+    return { openCells, surfaceCells };
 }
 
-function gameLoop() {
-    if (gameMode !== 'play') return;
-    
-    const speed = 4;
-    let dx = 0, dy = 0;
-    
-    if (keys['w'] || keys['arrowup']) dy -= speed;
-    if (keys['s'] || keys['arrowdown']) dy += speed;
-    if (keys['a'] || keys['arrowleft']) dx -= speed;
-    if (keys['d'] || keys['arrowright']) dx += speed;
-    
-    if (dx !== 0 || dy !== 0) {
-        if (!checkCollision(player.x + dx, player.y)) player.x += dx;
-        if (!checkCollision(player.x, player.y + dy)) player.y += dy;
-        
-        if (dx < 0) { player.facing = -1; player.direction = 'left'; }
-        else if (dx > 0) { player.facing = 1; player.direction = 'right'; }
-        else if (dy < 0) { player.direction = 'up'; }
-        else if (dy > 0) { player.direction = 'down'; }
-        
-        const time = Date.now();
-        const walkFrame = Math.floor(time / 150) % 2 === 0 ? '1' : '2';
-        
-        if (player.direction === 'up') {
-            player.el.style.backgroundImage = `url('assets/soldier_climb${walkFrame}.png')`;
-            player.el.style.transform = `scaleX(1)`; // reset flip for back view
-        } else {
-            player.el.style.backgroundImage = `url('assets/soldier_walk${walkFrame}.png')`;
-            player.el.style.transform = `scaleX(${player.facing})`;
+function buildLightPathData(cells, rect, areaRect) {
+    return cells.map(cell => {
+        const x = Math.round(rect.left - areaRect.left + cell.x * LIGHT_SUBCELL_SIZE);
+        const y = Math.round(rect.top - areaRect.top + cell.y * LIGHT_SUBCELL_SIZE);
+        const size = Math.ceil(LIGHT_SUBCELL_SIZE);
+        return `M ${x} ${y} H ${x + size} V ${y + size} H ${x} Z`;
+    }).join(' ');
+}
+
+function appendQuantizedLightBands(targetGroup, cells, rect, areaRect, radiusSubcells, opacityScale, minOpacity, steps) {
+    if (!cells.length) return;
+
+    const bands = new Map();
+
+    cells.forEach(cell => {
+        const normalized = Math.min(cell.distance / (radiusSubcells + 0.65), 1);
+        const rawOpacity = Math.max(minOpacity, (1 - normalized) * opacityScale);
+        const quantizedOpacity = Math.max(minOpacity, Math.round(rawOpacity * steps) / steps);
+        const key = quantizedOpacity.toFixed(3);
+
+        if (!bands.has(key)) bands.set(key, []);
+        bands.get(key).push(cell);
+    });
+
+    Array.from(bands.entries())
+        .sort((a, b) => parseFloat(a[0]) - parseFloat(b[0]))
+        .forEach(([opacity, bandCells]) => {
+            const field = document.createElementNS("http://www.w3.org/2000/svg", "path");
+            field.setAttribute('d', buildLightPathData(bandCells, rect, areaRect));
+            field.setAttribute('fill', 'black');
+            field.setAttribute('fill-opacity', opacity);
+            field.setAttribute('shape-rendering', 'crispEdges');
+            targetGroup.appendChild(field);
+        });
+}
+
+window.addEventListener('mousemove', (e) => {
+    const rect = board.getBoundingClientRect();
+    const currX = e.clientX - rect.left;
+    const currY = e.clientY - rect.top;
+
+    if (isInitialFocus) {
+        const entranceDoor = Array.from(document.querySelectorAll('.placed-pipe')).find(p => 
+            p.dataset.type === 'door' || p.dataset.type === 'door-metal'
+        );
+        if (entranceDoor) {
+            const doorX = parseFloat(entranceDoor.style.left) + GRID_SIZE / 2;
+            const doorY = parseFloat(entranceDoor.style.top) - GRID_SIZE / 2; // Tile ABOVE the door
+            const dist = Math.hypot(currX - doorX, currY - doorY);
+            // Only release focus if mouse is within 2 tiles of that spot
+            if (dist < GRID_SIZE * 2) {
+                isInitialFocus = false;
+            }
         }
-    } else {
-        if (player.direction === 'up') {
-            player.el.style.backgroundImage = `url('assets/soldier_back.png')`;
-            player.el.style.transform = `scaleX(1)`;
-        } else {
-            player.el.style.backgroundImage = `url('assets/soldier_idle.png')`;
-            player.el.style.transform = `scaleX(${player.facing})`;
-        }
-    }
-    
-    player.el.style.left = `${player.x}px`;
-    player.el.style.top = `${player.y}px`;
-    
-    if (player.heldItem) {
-        player.heldItem.style.left = `${player.x}px`;
-        player.heldItem.style.top = `${player.y - 20}px`;
     }
 
-    // Check for level completion
+    mousePos.x = currX;
+    mousePos.y = currY;
+    mousePos.clientX = e.clientX;
+    mousePos.clientY = e.clientY;
+});
+
+function gameLoop(timestamp) {
+    if (gameMode !== 'play') return;
+
+    const now = timestamp || performance.now();
+    updateMouseNpcs(now);
+    updateBulbLights();
     checkWinCondition();
-    
+
+    // Mouse Squeak Proximity Check
+    const mice = document.querySelectorAll('.placed-pipe[data-type="mouse-npc"]');
+    mice.forEach(mouse => {
+        const state = mouseNpcStates.get(mouse);
+        if (state) {
+            const mx = parseFloat(mouse.style.left) + GRID_SIZE/2;
+            const my = parseFloat(mouse.style.top) + GRID_SIZE/2;
+            const dist = Math.hypot(mx - mousePos.x, my - mousePos.y);
+            if (dist < 60) {
+                if (!state.lastSqueakAt || now - state.lastSqueakAt > 2000) {
+                    SFX.playSqueak();
+                    state.lastSqueakAt = now;
+                }
+            }
+        }
+    });
+
     requestAnimationFrame(gameLoop);
 }
+
+function updateBulbLights() {
+    if (gameMode !== 'play') return;
+    const mouseHolesGroup = document.getElementById('mouse-holes');
+    const bulbHolesGroup = document.getElementById('bulb-holes');
+    const backlightHoles = document.getElementById('backlight-holes');
+    const rect = board.getBoundingClientRect();
+    const areaRect = gameArea.getBoundingClientRect();
+    const pieces = Array.from(document.querySelectorAll('.placed-pipe'));
+    const boardWidthTiles = Math.round(rect.width / LIGHT_SUBCELL_SIZE);
+    const boardHeightTiles = Math.round(rect.height / LIGHT_SUBCELL_SIZE);
+
+    clearDynamicLightDefs();
+
+    const occluderMap = buildLightOccluderMap(pieces);
+
+    if (mouseHolesGroup) {
+        mouseHolesGroup.innerHTML = '';
+
+        let focusX = mousePos.x;
+        let focusY = mousePos.y;
+
+        if (isInitialFocus) {
+            const entranceDoor = Array.from(document.querySelectorAll('.placed-pipe')).find(p => 
+                p.dataset.type === 'door' || p.dataset.type === 'door-metal'
+            );
+            if (entranceDoor) {
+                focusX = parseFloat(entranceDoor.style.left) + GRID_SIZE / 2;
+                focusY = parseFloat(entranceDoor.style.top) - GRID_SIZE / 2; // Tile ABOVE the door
+            }
+        }
+
+        const snappedMouseX = Math.floor(focusX / GRID_SIZE) * GRID_SIZE + GRID_SIZE / 2;
+        const snappedMouseY = Math.floor(focusY / GRID_SIZE) * GRID_SIZE + GRID_SIZE / 2;
+        const mouseCenterX = rect.left - areaRect.left + snappedMouseX;
+        const mouseCenterY = rect.top - areaRect.top + snappedMouseY;
+        const mouseSubX = Math.floor(snappedMouseX / LIGHT_SUBCELL_SIZE);
+        const mouseSubY = Math.floor(snappedMouseY / LIGHT_SUBCELL_SIZE);
+        const mouseLight = buildLitSubcells(
+            mouseSubX,
+            mouseSubY,
+            MOUSE_LIGHT_RADIUS_SUBCELLS,
+            boardWidthTiles,
+            boardHeightTiles,
+            occluderMap
+        );
+
+        appendQuantizedLightBands(mouseHolesGroup, mouseLight.surfaceCells, rect, areaRect, MOUSE_LIGHT_RADIUS_SUBCELLS, 0.18, 0.08, 10);
+        appendQuantizedLightBands(mouseHolesGroup, mouseLight.openCells, rect, areaRect, MOUSE_LIGHT_RADIUS_SUBCELLS, 0.9, 0.16, 8);
+
+        const mouseGlow = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        mouseGlow.setAttribute('cx', mouseCenterX);
+        mouseGlow.setAttribute('cy', mouseCenterY);
+        mouseGlow.setAttribute('r', GRID_SIZE * 0.7);
+        mouseGlow.setAttribute('fill', 'black');
+        mouseGlow.setAttribute('fill-opacity', '0.55');
+        mouseHolesGroup.appendChild(mouseGlow);
+    }
+
+    if (bulbHolesGroup) {
+        bulbHolesGroup.innerHTML = '';
+        const litBulbs = pieces.filter(p => p.dataset.type === 'bulb' || p.dataset.type === 'inline-bulb');
+
+        litBulbs.forEach(bulb => {
+            if (!bulb.classList.contains('lit')) return;
+
+            const bx = parseFloat(bulb.style.left) + GRID_SIZE / 2;
+            const by = parseFloat(bulb.style.top) + GRID_SIZE / 2;
+            const { x: bgx, y: bgy } = getPieceGridPosition(bulb);
+            const bulbSubX = bgx * LIGHT_SUBDIVISIONS + LIGHT_SUBDIVISIONS / 2;
+            const bulbSubY = bgy * LIGHT_SUBDIVISIONS + LIGHT_SUBDIVISIONS / 2;
+
+            const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+            const bulbLight = buildLitSubcells(
+                bulbSubX,
+                bulbSubY,
+                BULB_LIGHT_RADIUS_SUBCELLS,
+                boardWidthTiles,
+                boardHeightTiles,
+                occluderMap
+            );
+
+            appendQuantizedLightBands(group, bulbLight.surfaceCells, rect, areaRect, BULB_LIGHT_RADIUS_SUBCELLS, 0.24, 0.1, 10);
+            appendQuantizedLightBands(group, bulbLight.openCells, rect, areaRect, BULB_LIGHT_RADIUS_SUBCELLS, 1, 0.18, 8);
+
+            const sourceGlow = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+            sourceGlow.setAttribute('cx', rect.left - areaRect.left + bx);
+            sourceGlow.setAttribute('cy', rect.top - areaRect.top + by);
+            sourceGlow.setAttribute('r', GRID_SIZE * 0.6);
+            sourceGlow.setAttribute('fill', 'black');
+            sourceGlow.setAttribute('fill-opacity', '1');
+            group.appendChild(sourceGlow);
+
+            bulbHolesGroup.appendChild(group);
+        });
+    }
+
+    if (backlightHoles) {
+        backlightHoles.innerHTML = '';
+        pieces.forEach(p => {
+            const gx = Math.round(parseFloat(p.style.left) / GRID_SIZE);
+            const gy = Math.round(parseFloat(p.style.top) / GRID_SIZE);
+
+            // Restore: perimeter only backlight for the room boundaries
+            if (gx === 0 || gx === 24 || gy === 0 || gy === 13) {
+                const rect_bl = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+                rect_bl.setAttribute('x', rect.left - areaRect.left + gx * GRID_SIZE);
+                rect_bl.setAttribute('y', rect.top - areaRect.top + gy * GRID_SIZE);
+                rect_bl.setAttribute('width', GRID_SIZE);
+                rect_bl.setAttribute('height', GRID_SIZE);
+                rect_bl.setAttribute('fill', 'black');
+                rect_bl.setAttribute('opacity', '0.08'); // Brighter as requested
+                backlightHoles.appendChild(rect_bl);
+            }
+        });
+    }
+}
+
+
+checkWinCondition();
+requestAnimationFrame(gameLoop);
+
 
 function checkWinCondition() {
     const doors = Array.from(document.querySelectorAll('.placed-pipe')).filter(p => p.dataset.type === 'door' || p.dataset.type === 'door-metal');
     if (doors.length === 0) return;
-    
+
     // Top door is the one with the smallest Y
     doors.sort((a, b) => parseFloat(a.style.top) - parseFloat(b.style.top));
     const exitDoor = doors[0];
-    
+
     if (exitDoor && exitDoor.dataset.unlocked === "true") {
-        const dx = Math.abs((player.x + 25) - (parseFloat(exitDoor.style.left) + 25));
-        const dy = Math.abs((player.y + 25) - (parseFloat(exitDoor.style.top) + 25));
-        
-        if (dx < 20 && dy < 20) {
+        const dx = Math.abs(mousePos.x - (parseFloat(exitDoor.style.left) + GRID_SIZE / 2));
+        const dy = Math.abs(mousePos.y - (parseFloat(exitDoor.style.top) + GRID_SIZE / 2));
+
+        if (dx < GRID_SIZE && dy < GRID_SIZE) {
             winLevel();
         }
     }
@@ -602,24 +1169,45 @@ function checkWinCondition() {
 
 function winLevel() {
     gameMode = 'editor'; // Pause loop
-    if (player.el) player.el.remove();
-    player.heldItem = null;
     
-    // Unlock next level
-    const highest = parseInt(localStorage.getItem('highest_unlocked_level')) || 1;
-    if (currentLevel >= highest) {
-        localStorage.setItem('highest_unlocked_level', currentLevel + 1);
-    }
+    const splash = document.getElementById('level-splash');
+    const splashText = document.getElementById('splash-level-text');
+    
+    // Step 1: Show Splash
+    splash.classList.remove('hidden');
+    setTimeout(() => {
+        splash.classList.add('active');
+    }, 10);
 
-    currentLevel++;
-    if (loadLevel(currentLevel)) {
-        startGameMode();
-    } else {
-        // No more levels
-        document.getElementById('btn-exit-game').classList.add('hidden');
-        editorUI.classList.add('hidden');
-        creditsMenu.classList.remove('hidden');
-    }
+    // Step 2: Prepare next level behind the scenes
+    setTimeout(() => {
+        const highest = parseInt(localStorage.getItem('highest_unlocked_level')) || 1;
+        if (currentLevel >= highest) {
+            localStorage.setItem('highest_unlocked_level', currentLevel + 1);
+        }
+
+        currentLevel++;
+        if (loadLevel(currentLevel)) {
+            splashText.innerText = `LEVEL ${currentLevel}`;
+            SFX.playScan();
+            startGameMode();
+            
+            // Step 3: Hold the splash for dramatic effect then hide
+            setTimeout(() => {
+                splash.classList.remove('active');
+                setTimeout(() => {
+                    splash.classList.add('hidden');
+                }, 600);
+            }, 1200);
+        } else {
+            // No more levels
+            document.getElementById('btn-exit-game').classList.add('hidden');
+            editorUI.classList.add('hidden');
+            creditsMenu.classList.remove('hidden');
+            splash.classList.remove('active');
+            splash.classList.add('hidden');
+        }
+    }, 600);
 }
 
 // --- Drag & Drop Editor Logic ---
@@ -627,30 +1215,31 @@ function winLevel() {
 paletteItems.forEach(item => {
     item.addEventListener('mousedown', (e) => {
         if (e.button !== 0) return; // Only left click
-        
+
         // Create a new piece
         const clone = item.cloneNode(true);
         clone.className = 'placed-pipe';
-        clone.style.transform = `rotate(0deg) scaleX(1)`;
         clone.dataset.rotation = 0;
         clone.dataset.flip = 1;
-        
+        applyPieceTransform(clone);
+
         if (item.dataset.flippable) {
             clone.dataset.flippable = 'true';
         }
-        
+
         clone.removeAttribute('draggable');
-        
+
         board.appendChild(clone);
-        
+
         // Start dragging immediately
         startDragging(clone, e);
     });
 });
 
 board.addEventListener('mousedown', (e) => {
-    if (gameMode === 'play') return; // Disable mouse dragging in play mode
-    
+    // In play mode, NO DRAGGING allowed. Only editor mode allows movement.
+    if (gameMode === 'play') return;
+
     const target = e.target.closest('.placed-pipe');
     if (target) {
         startDragging(target, e);
@@ -664,22 +1253,22 @@ board.addEventListener('mousedown', (e) => {
 });
 
 function startDragging(piece, e) {
-    if (e.button !== 0) return; 
-    
+    if (e.button !== 0) return;
+
     isDragging = true;
     draggedPiece = piece;
-    
+
     if (selectedPiece && selectedPiece !== piece) {
         selectedPiece.classList.remove('selected');
     }
-    
+
     selectedPiece = piece;
     piece.classList.add('selected');
     piece.classList.add('dragging');
-    
+
     offsetX = GRID_SIZE / 2;
     offsetY = GRID_SIZE / 2;
-    
+
     movePiece(e.clientX, e.clientY);
 }
 
@@ -693,46 +1282,46 @@ window.addEventListener('mouseup', (e) => {
     if (isDragging && draggedPiece) {
         isDragging = false;
         draggedPiece.classList.remove('dragging');
-        
+
         // Snap to grid on drop
         snapToGrid(draggedPiece);
-        
+
         draggedPiece = null;
     }
 });
 
 function movePiece(clientX, clientY) {
     const boardRect = board.getBoundingClientRect();
-    
+
     let x = clientX - boardRect.left - offsetX;
     let y = clientY - boardRect.top - offsetY;
-    
+
     draggedPiece.style.left = `${x}px`;
     draggedPiece.style.top = `${y}px`;
 }
 
 function snapToGrid(piece) {
     const boardRect = board.getBoundingClientRect();
-    
+
     let x = parseFloat(piece.style.left) || 0;
     let y = parseFloat(piece.style.top) || 0;
-    
+
     const snapX = Math.round(x / GRID_SIZE) * GRID_SIZE;
     const snapY = Math.round(y / GRID_SIZE) * GRID_SIZE;
-    
+
     // Delete if dropped outside the visible board
     if (
-        snapX < -GRID_SIZE/2 || 
-        snapY < -GRID_SIZE/2 || 
-        snapX > boardRect.width - GRID_SIZE/2 || 
-        snapY > boardRect.height - GRID_SIZE/2
+        snapX < -GRID_SIZE / 2 ||
+        snapY < -GRID_SIZE / 2 ||
+        snapX > boardRect.width - GRID_SIZE / 2 ||
+        snapY > boardRect.height - GRID_SIZE / 2
     ) {
         piece.remove();
         if (selectedPiece === piece) selectedPiece = null;
         updateWires();
         return;
     }
-    
+
     piece.style.left = `${snapX}px`;
     piece.style.top = `${snapY}px`;
     updateWires();
@@ -744,85 +1333,40 @@ window.addEventListener('keydown', (e) => {
         if (e.key === ' ' || ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(e.key.toLowerCase())) {
             e.preventDefault(); // Prevent page scrolling
         }
-        
+
         if (e.key === ' ') {
-            if (player.heldItem) {
-                // Drop
-                const snapX = Math.round(player.x / GRID_SIZE) * GRID_SIZE;
-                const snapY = Math.round(player.y / GRID_SIZE) * GRID_SIZE;
-                player.heldItem.style.left = `${snapX}px`;
-                player.heldItem.style.top = `${snapY}px`;
-                player.heldItem.style.zIndex = 'auto';
-                player.heldItem = null;
-                updateWires();
-            } else {
-                // Pick up
-                const electricalTypes = ['straight', 'curve', 'tshape', 'cross', 'battery', 'bulb', 'inline-bulb', 'switch', 'wall-socket'];
-                const pieces = Array.from(document.querySelectorAll('.placed-pipe')).filter(p => electricalTypes.includes(p.dataset.type));
-                
-                let closest = null;
-                let minDist = Infinity;
-                pieces.forEach(p => {
-                    let px = parseFloat(p.style.left) + 20;
-                    let py = parseFloat(p.style.top) + 20;
-                    let dist = Math.hypot(px - (player.x + 20), py - (player.y + 20));
-                    if (dist < 40 && dist < minDist) {
-                        minDist = dist;
-                        closest = p;
-                    }
-                });
-                
-                if (closest) {
-                    player.heldItem = closest;
-                    closest.style.zIndex = '300';
-                    updateWires();
-                }
-            }
+            // Pick up/Drop logic removed for play mode as per request
+            // Interaction is now only Rotation (R) and Switches (E)
         }
-        
+
         if (e.key === 'r' || e.key === 'R') {
-            if (player.heldItem) {
-                let rotation = parseInt(player.heldItem.dataset.rotation) || 0;
-                rotation = (rotation + 90) % 360;
-                player.heldItem.dataset.rotation = rotation;
-                let flip = parseInt(player.heldItem.dataset.flip) || 1;
-                player.heldItem.style.transform = `rotate(${rotation}deg) scaleX(${flip})`;
-                updateWires();
-            } else {
-                // Rotate nearby item
-                const electricalTypes = ['straight', 'curve', 'tshape', 'cross', 'battery', 'bulb', 'inline-bulb', 'switch', 'wall-socket'];
-                const pieces = Array.from(document.querySelectorAll('.placed-pipe')).filter(p => electricalTypes.includes(p.dataset.type));
-                
-                let closest = null;
-                let minDist = Infinity;
-                pieces.forEach(p => {
-                    let px = parseFloat(p.style.left) + 20;
-                    let py = parseFloat(p.style.top) + 20;
-                    let dist = Math.hypot(px - (player.x + 20), py - (player.y + 20));
-                    if (dist < 40 && dist < minDist) {
-                        minDist = dist;
-                        closest = p;
-                    }
-                });
-                
-                if (closest) {
-                    let rotation = parseInt(closest.dataset.rotation) || 0;
-                    rotation = (rotation + 90) % 360;
-                    closest.dataset.rotation = rotation;
-                    let flip = parseInt(closest.dataset.flip) || 1;
-                    closest.style.transform = `rotate(${rotation}deg) scaleX(${flip})`;
-                    updateWires();
+            const pieces = Array.from(document.querySelectorAll('.placed-pipe')).filter(p => PLAY_ROTATABLE_TYPES.includes(p.dataset.type));
+
+            let closest = null;
+            let minDist = Infinity;
+            pieces.forEach(p => {
+                let px = parseFloat(p.style.left) + GRID_SIZE / 2;
+                let py = parseFloat(p.style.top) + GRID_SIZE / 2;
+                let dist = Math.hypot(px - mousePos.x, py - mousePos.y);
+                if (dist < 40 && dist < minDist) {
+                    minDist = dist;
+                    closest = p;
                 }
+            });
+
+            if (closest) {
+                rotatePiece(closest);
             }
         }
-        
+
         if (e.key === 'e' || e.key === 'E') {
             // Interact with switch
             const switches = Array.from(document.querySelectorAll('.placed-pipe')).filter(p => p.dataset.type === 'switch');
             switches.forEach(p => {
-                let px = parseFloat(p.style.left) + 20;
-                let py = parseFloat(p.style.top) + 20;
-                if (Math.hypot(px - (player.x + 20), py - (player.y + 20)) < 40) {
+                let px = parseFloat(p.style.left) + GRID_SIZE / 2;
+                let py = parseFloat(p.style.top) + GRID_SIZE / 2;
+                if (Math.hypot(px - mousePos.x, py - mousePos.y) < 40) {
+                    SFX.playClick();
                     toggleSwitch(p);
                 }
             });
@@ -830,26 +1374,22 @@ window.addEventListener('keydown', (e) => {
         return;
     }
 
-    if (e.key === 'r' || e.key === 'R') {
+    if ((e.key === 'r' || e.key === 'R') && gameMode === 'editor') {
         const target = draggedPiece || selectedPiece;
         if (target) {
             if (target.dataset.flippable === 'true') {
+                SFX.playClick();
                 let flip = parseInt(target.dataset.flip) || 1;
                 flip = flip === 1 ? -1 : 1;
                 target.dataset.flip = flip;
-                let rotation = parseInt(target.dataset.rotation) || 0;
-                target.style.transform = `rotate(${rotation}deg) scaleX(${flip})`;
+                applyPieceTransform(target);
+                updateWires();
             } else {
-                let rotation = parseInt(target.dataset.rotation) || 0;
-                rotation = (rotation + 90) % 360;
-                target.dataset.rotation = rotation;
-                let flip = parseInt(target.dataset.flip) || 1;
-                target.style.transform = `rotate(${rotation}deg) scaleX(${flip})`;
+                rotatePiece(target);
             }
-            updateWires();
         }
     }
-    
+
     if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedPiece && !isDragging) {
             selectedPiece.remove();
@@ -874,123 +1414,138 @@ board.addEventListener('dblclick', (e) => {
     }
 });
 
+// Single click to rotate (Play Mode)
+board.addEventListener('click', (e) => {
+    if (gameMode !== 'play') return;
+    const target = e.target.closest('.placed-pipe');
+    if (target && PLAY_ROTATABLE_TYPES.includes(target.dataset.type)) {
+        rotatePiece(target);
+    }
+});
+
 // --- Autotiling Wires Logic ---
 function updateWires() {
     const pieces = Array.from(document.querySelectorAll('.placed-pipe'));
-    
+
     const grid = {};
     pieces.forEach(p => {
-        let x = parseFloat(p.style.left) || 0;
-        let y = parseFloat(p.style.top) || 0;
-        let gridX = Math.round(x / GRID_SIZE);
-        let gridY = Math.round(y / GRID_SIZE);
+        let x = parseFloat(p.style.left);
+        let y = parseFloat(p.style.top);
+        if (isNaN(x) || isNaN(y)) return;
+        // Force -0 to 0 to prevent string key mismatches
+        let gridX = Math.round(x / GRID_SIZE) + 0;
+        let gridY = Math.round(y / GRID_SIZE) + 0;
         grid[`${gridX},${gridY}`] = p;
     });
 
     pieces.forEach(p => {
-        let x = parseFloat(p.style.left) || 0;
-        let y = parseFloat(p.style.top) || 0;
-        let gridX = Math.round(x / GRID_SIZE);
-        let gridY = Math.round(y / GRID_SIZE);
-        
-        const rotation = parseInt(p.dataset.rotation) || 0;
-        const flip = parseInt(p.dataset.flip) || 1;
-        
-        const exposedElements = p.querySelectorAll('.exposed');
-        
-        exposedElements.forEach(el => {
-            const baseDir = el.getAttribute('data-dir');
-            if (!baseDir) return;
-            
-            const dirAngles = { 'top': 0, 'right': 90, 'bottom': 180, 'left': 270 };
-            let angle = dirAngles[baseDir];
-            
-            if (flip === -1) {
-                if (angle === 90) angle = 270;
-                else if (angle === 270) angle = 90;
-            }
-            
-            angle = (angle + rotation) % 360;
-            if (angle < 0) angle += 360;
-            
+        const portData = getGlobalPorts(p);
+        const gridX = Math.round(parseFloat(p.style.left) / GRID_SIZE) + 0;
+        const gridY = Math.round(parseFloat(p.style.top) / GRID_SIZE) + 0;
+
+        portData.forEach(port => {
+            const angle = port.angle;
+            const el = port.el;
+
             let nx = gridX;
             let ny = gridY;
             if (angle === 0) ny -= 1;
             else if (angle === 90) nx += 1;
             else if (angle === 180) ny += 1;
             else if (angle === 270) nx -= 1;
-            
+
             const neighbor = grid[`${nx},${ny}`];
             if (neighbor) {
-                el.style.opacity = '0';
-                el.style.visibility = 'hidden';
+                const neighborPorts = getGlobalPorts(neighbor).map(pd => pd.angle);
+                const oppositeAngle = normalizeRotation(angle + 180);
+                if (neighborPorts.includes(oppositeAngle)) {
+                    el.style.opacity = '0';
+                    el.style.visibility = 'hidden';
+                } else {
+                    el.style.opacity = '1';
+                    el.style.visibility = 'visible';
+                }
             } else {
                 el.style.opacity = '1';
                 el.style.visibility = 'visible';
             }
+
+            const spark = ensureSparkOverlay(el);
+            if (spark) {
+                const isHidden = (el.style.visibility === 'hidden' || el.style.opacity === '0');
+                spark.style.opacity = isHidden ? '0' : '1';
+                spark.style.visibility = isHidden ? 'hidden' : 'visible';
+                if (isHidden) {
+                    spark.classList.remove('live');
+                }
+            }
         });
     });
-    
+
     updateCircuit();
 }
 
 // --- Circuit Logic ---
 
 function getGlobalPorts(piece) {
-    const rotation = parseInt(piece.dataset.rotation) || 0;
+    const rotation = normalizeRotation(parseInt(piece.dataset.rotation) || 0);
     const flip = parseInt(piece.dataset.flip) || 1;
     const exposedElements = piece.querySelectorAll('.exposed');
-    const ports = [];
-    
+    const portData = [];
+
     exposedElements.forEach(el => {
         const baseDir = el.getAttribute('data-dir');
         if (!baseDir) return;
-        
+
         const dirAngles = { 'top': 0, 'right': 90, 'bottom': 180, 'left': 270 };
         let angle = dirAngles[baseDir];
-        
+
         if (flip === -1) {
             if (angle === 90) angle = 270;
             else if (angle === 270) angle = 90;
         }
-        
-        angle = (angle + rotation) % 360;
-        if (angle < 0) angle += 360;
-        
-        ports.push(angle);
+
+        angle = normalizeRotation(angle + rotation);
+        portData.push({ angle, el });
     });
-    return ports;
+    return portData;
 }
 
 function updateCircuit() {
     const pieces = Array.from(document.querySelectorAll('.placed-pipe'));
-    
+
     pieces.forEach(p => {
         if (p.dataset.type === 'bulb' || p.dataset.type === 'inline-bulb') {
             p.classList.remove('lit');
         }
+        // Full reset of all sparks on every frame to prevent "ghost" sparks
+        p.querySelectorAll('.wire-spark').forEach(spark => {
+            spark.classList.remove('live');
+            spark.style.opacity = '0';
+            spark.style.visibility = 'hidden';
+        });
         if (p.dataset.type === 'wall-socket') {
             const light = p.querySelector('.socket-light');
             if (light) light.setAttribute('fill', '#d63031');
         }
     });
-    
+
     const grid = {};
     pieces.forEach(p => {
         let x = parseFloat(p.style.left) || 0;
         let y = parseFloat(p.style.top) || 0;
-        let gridX = Math.round(x / GRID_SIZE);
-        let gridY = Math.round(y / GRID_SIZE);
+        let gridX = Math.round(x / GRID_SIZE) + 0;
+        let gridY = Math.round(y / GRID_SIZE) + 0;
         grid[`${gridX},${gridY}`] = { piece: p, ports: getGlobalPorts(p) };
     });
 
     const batteries = pieces.filter(p => p.dataset.type === 'battery');
-    
+
     // User logic: Bottom wall socket is always a power source
     const sockets = pieces.filter(p => p.dataset.type === 'wall-socket');
     let bottomSocket = null;
     let topSocket = null;
-    
+
     if (sockets.length > 0) {
         sockets.sort((a, b) => parseFloat(b.style.top) - parseFloat(a.style.top));
         bottomSocket = sockets[0];
@@ -1001,7 +1556,7 @@ function updateCircuit() {
 
     const powered = new Set();
     const queue = [];
-    
+
     batteries.forEach(b => {
         powered.add(b);
         queue.push(b);
@@ -1011,34 +1566,36 @@ function updateCircuit() {
         powered.add(bottomSocket);
         queue.push(bottomSocket);
     }
-    
-    while(queue.length > 0) {
+
+    while (queue.length > 0) {
         const curr = queue.shift();
-        
+
         if (curr.dataset.type === 'switch' && curr.dataset.state === 'off') {
             continue;
         }
-        
+
         let x = parseFloat(curr.style.left) || 0;
         let y = parseFloat(curr.style.top) || 0;
         let gridX = Math.round(x / GRID_SIZE);
         let gridY = Math.round(y / GRID_SIZE);
-        
+
         const cell = grid[`${gridX},${gridY}`];
         if (!cell) continue;
-        
-        cell.ports.forEach(angle => {
+
+        cell.ports.forEach(portObj => {
+            const angle = portObj.angle;
             let nx = gridX;
             let ny = gridY;
             if (angle === 0) ny -= 1;
             else if (angle === 90) nx += 1;
             else if (angle === 180) ny += 1;
             else if (angle === 270) nx -= 1;
-            
+
             const neighborCell = grid[`${nx},${ny}`];
             if (neighborCell) {
-                const oppositeAngle = (angle + 180) % 360;
-                if (neighborCell.ports.includes(oppositeAngle)) {
+                const oppositeAngle = normalizeRotation(angle + 180);
+                const neighborPorts = neighborCell.ports.map(pd => pd.angle);
+                if (neighborPorts.includes(oppositeAngle)) {
                     if (!powered.has(neighborCell.piece)) {
                         powered.add(neighborCell.piece);
                         queue.push(neighborCell.piece);
@@ -1047,7 +1604,7 @@ function updateCircuit() {
             }
         });
     }
-    
+
     powered.forEach(p => {
         if (p.dataset.type === 'bulb' || p.dataset.type === 'inline-bulb') {
             p.classList.add('lit');
@@ -1056,22 +1613,68 @@ function updateCircuit() {
             const light = p.querySelector('.socket-light');
             if (light) light.setAttribute('fill', '#00b894');
         }
+
+        // Don't spark on batteries or sockets
+        if (p.dataset.type === 'battery' || p.dataset.type === 'wall-socket') return;
+
+        let px = parseFloat(p.style.left) || 0;
+        let py = parseFloat(p.style.top) || 0;
+        let pgx = Math.round(px / GRID_SIZE) + 0;
+        let pgy = Math.round(py / GRID_SIZE) + 0;
+
+        const portData = getGlobalPorts(p);
+        portData.forEach(port => {
+            const angle = port.angle;
+            const exposedElement = port.el;
+            const spark = ensureSparkOverlay(exposedElement);
+            if (!spark) return;
+
+            let nx = pgx, ny = pgy;
+            if (angle === 0) ny -= 1;
+            else if (angle === 90) nx += 1;
+            else if (angle === 180) ny += 1;
+            else if (angle === 270) nx -= 1;
+
+            const neighborCell = grid[`${nx},${ny}`];
+            let isConnected = false;
+            if (neighborCell) {
+                const neighborPorts = neighborCell.ports.map(pd => pd.angle);
+                const oppositeAngle = normalizeRotation(angle + 180);
+                if (neighborPorts.includes(oppositeAngle)) {
+                    isConnected = true;
+                }
+            }
+
+            if (!isConnected) {
+                spark.classList.add('live');
+                spark.style.opacity = '1';
+                spark.style.visibility = 'visible';
+            } else {
+                spark.classList.remove('live');
+                spark.style.opacity = '0';
+                spark.style.visibility = 'hidden';
+            }
+        });
     });
 
-    // Check if exit door should unlock
     if (gameMode === 'play' && topSocket && powered.has(topSocket)) {
         unlockExitDoor();
+    }
+
+    // NEW: Update bulb light mask after circuit state changes
+    if (gameMode === 'play') {
+        updateBulbLights();
     }
 }
 
 function unlockExitDoor() {
     const doors = Array.from(document.querySelectorAll('.placed-pipe')).filter(p => p.dataset.type === 'door' || p.dataset.type === 'door-metal');
     if (doors.length === 0) return;
-    
+
     // Top door is the one with the smallest Y
     doors.sort((a, b) => parseFloat(a.style.top) - parseFloat(b.style.top));
     const topDoor = doors[0];
-    
+
     if (topDoor && !topDoor.classList.contains('door-unlocking')) {
         topDoor.classList.add('door-unlocking');
         // Optional: remove after animation? No, just keep it non-collidable
@@ -1083,10 +1686,10 @@ function unlockExitDoor() {
 function toggleSwitch(target) {
     const state = target.dataset.state === 'on' ? 'off' : 'on';
     target.dataset.state = state;
-    
+
     const bg = target.querySelector('.switch-bg');
     const lever = target.querySelector('.switch-lever');
-    
+
     if (state === 'on') {
         bg.setAttribute('fill', '#00b894');
         lever.setAttribute('y', '25');
@@ -1094,14 +1697,6 @@ function toggleSwitch(target) {
         bg.setAttribute('fill', '#d63031');
         lever.setAttribute('y', '50');
     }
-    
-    updateCircuit();
-}
 
-board.addEventListener('click', (e) => {
-    if (gameMode === 'play') return;
-    const target = e.target.closest('.placed-pipe');
-    if (target && target.dataset.type === 'switch') {
-        toggleSwitch(target);
-    }
-});
+    updateWires();
+}
