@@ -366,6 +366,7 @@ function loadLevel(levelNum) {
 
 function startGameMode() {
     gameMode = 'play';
+    document.getElementById('game-viewport').classList.remove('editor-mode');
     isInitialFocus = true;
     document.getElementById('board-inner').classList.remove('show-grid');
     initializeMouseNpcs();
@@ -377,6 +378,56 @@ function startGameMode() {
         gameArea.appendChild(mask); // Put it in gameArea
     }
     document.getElementById('visibility-mask').classList.remove('hidden');
+
+    // Clear any existing hints
+    document.getElementById('tutorial-hint')?.remove();
+
+    // Add Level 1 Tutorial Hint
+    if (currentLevel === 1) {
+        const hint = document.createElement('div');
+        hint.id = 'tutorial-hint';
+        hint.innerHTML = 'Click the wires to rotate them';
+        hint.style.cssText = `
+            position: absolute;
+            left: 100px;
+            top: 250px;
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 24px;
+            font-weight: bold;
+            pointer-events: none;
+            z-index: 10000;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            width: 300px;
+            text-align: center;
+            font-family: 'Inter', sans-serif;
+            text-shadow: 0 0 10px rgba(255,255,255,0.3);
+        `;
+        document.getElementById('game-viewport').appendChild(hint);
+    }
+
+    if (currentLevel === 2) {
+        const hint = document.createElement('div');
+        hint.id = 'tutorial-hint';
+        hint.innerHTML = 'Oh btw, there is a mouse infestation.';
+        hint.style.cssText = `
+            position: absolute;
+            left: 100px;
+            top: 250px;
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 24px;
+            font-weight: bold;
+            pointer-events: none;
+            z-index: 10000;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            width: 300px;
+            text-align: center;
+            font-family: 'Inter', sans-serif;
+            text-shadow: 0 0 10px rgba(255,255,255,0.3);
+        `;
+        document.getElementById('game-viewport').appendChild(hint);
+    }
 
     // Find bottom door for spawn position (mouse start)
     const doors = Array.from(document.querySelectorAll('.placed-pipe')).filter(p => p.dataset.type === 'door' || p.dataset.type === 'door-metal');
@@ -543,6 +594,16 @@ if (btnCreditsBack) {
     });
 }
 
+if (btnBuild) {
+    btnBuild.addEventListener('click', () => {
+        gameMode = 'editor';
+        document.getElementById('game-viewport').classList.add('editor-mode');
+        document.getElementById('main-menu').classList.add('hidden');
+        document.getElementById('editor-ui').classList.remove('hidden');
+        createNewLevel();
+    });
+}
+
 
 let mousePos = { x: 0, y: 0, clientX: 0, clientY: 0 };
 let isInitialFocus = true;
@@ -591,6 +652,11 @@ function rotatePiece(piece) {
     piece.dataset.rotation = rotation;
     applyPieceTransform(piece);
     updateWires();
+
+    // Remove tutorial hint if present (Level 1 only)
+    if (currentLevel === 1) {
+        document.getElementById('tutorial-hint')?.remove();
+    }
 }
 
 function updateMouseNpcSprite(piece, direction = 'down', frame = 0, action = 'walk') {
@@ -734,7 +800,7 @@ function getNpcBlockerMap(ignorePiece) {
     return blockers;
 }
 
-function chooseMouseNpcDirection(piece, currentDirection) {
+function chooseMouseNpcDirection(piece, currentDirection, targetPos = null) {
     const boardRect = board.getBoundingClientRect();
     const maxX = Math.max(0, Math.round(boardRect.width / GRID_SIZE) - 1);
     const maxY = Math.max(0, Math.round(boardRect.height / GRID_SIZE) - 1);
@@ -744,19 +810,33 @@ function chooseMouseNpcDirection(piece, currentDirection) {
         left: { name: 'left', dx: -1, dy: 0 },
         right: { name: 'right', dx: 1, dy: 0 }
     };
-    const directions = [
-        directionVectors[currentDirection] || directionVectors.down,
-        ...shuffleArray([
-            directionVectors.up,
-            directionVectors.down,
-            directionVectors.left,
-            directionVectors.right
-        ].filter(direction => direction.name !== currentDirection))
-    ];
-    const blockerMap = getNpcBlockerMap(piece);
-    const { x, y } = getPieceGridPosition(piece);
 
-    for (const direction of directions) {
+    let possible = [
+        directionVectors.up,
+        directionVectors.down,
+        directionVectors.left,
+        directionVectors.right
+    ];
+
+    // If we have a target, prioritize directions that get us closer
+    const { x, y } = getPieceGridPosition(piece);
+    if (targetPos) {
+        possible.sort((a, b) => {
+            const distA = Math.hypot((x + a.dx) - targetPos.x, (y + a.dy) - targetPos.y);
+            const distB = Math.hypot((x + b.dx) - targetPos.x, (y + b.dy) - targetPos.y);
+            return distA - distB;
+        });
+    } else {
+        // Randomize if no target
+        possible = [
+            directionVectors[currentDirection] || directionVectors.down,
+            ...shuffleArray(possible.filter(d => d.name !== currentDirection))
+        ];
+    }
+
+    const blockerMap = getNpcBlockerMap(piece);
+
+    for (const direction of possible) {
         const nextX = x + direction.dx;
         const nextY = y + direction.dy;
         if (nextX < 0 || nextY < 0 || nextX > maxX || nextY > maxY) continue;
@@ -786,42 +866,91 @@ function updateMouseNpcs(timestamp) {
                 lastFrameAt: timestamp,
                 frame: 0,
                 stepsRemaining: 0,
-                interactionsLeft: maxInteractions,
+                interactionsLeft: maxInteractions || (currentLevel * 2), // Auto-scale interactions
                 lastSabotageAt: 0
             };
             mouseNpcStates.set(piece, state);
         }
 
         const gridPos = getPieceGridPosition(piece);
+        // Sabotage Frequency: Scaled by level as requested
+        // Level 2: 1200ms, Level 3: 1000ms, Level 5: 300ms, Level 9+: 150ms
+        let sabotageCooldown = 3000; // Default fallback
+        if (currentLevel === 2) sabotageCooldown = 1200;
+        else if (currentLevel === 3) sabotageCooldown = 1000;
+        else if (currentLevel === 4) sabotageCooldown = 600;
+        else if (currentLevel === 5) sabotageCooldown = 300;
+        else if (currentLevel === 6) sabotageCooldown = 250;
+        else if (currentLevel === 7) sabotageCooldown = 200;
+        else if (currentLevel === 8) sabotageCooldown = 175;
+        else if (currentLevel >= 9) sabotageCooldown = 150;
 
-        // Sabotage Logic: Sniff out powered wires if we have interactions left
-        if (state.interactionsLeft > 0 && timestamp - (state.lastSabotageAt || 0) > 8000) {
-            const tilesOnMe = Array.from(document.querySelectorAll('.placed-pipe')).filter(p => {
-                if (p === piece) return false;
-                const pPos = getPieceGridPosition(p);
-                return pPos.x === gridPos.x && pPos.y === gridPos.y;
-            });
+        // Sabotage Logic: Sniff out wires
+        if (timestamp - (state.lastSabotageAt || 0) > sabotageCooldown) {
+            // Check current tile AND adjacent tiles
+            const neighbors = [
+                { nx: gridPos.x, ny: gridPos.y },
+                { nx: gridPos.x + 1, ny: gridPos.y },
+                { nx: gridPos.x - 1, ny: gridPos.y },
+                { nx: gridPos.x, ny: gridPos.y + 1 },
+                { nx: gridPos.x, ny: gridPos.y - 1 }
+            ];
 
-            const wire = tilesOnMe.find(p => PLAY_ROTATABLE_TYPES.includes(p.dataset.type));
-            if (wire) {
-                const isPowered = wire.classList.contains('powered');
-                // Sabotage if it's powered (disturbing the circuit!)
-                if (isPowered || Math.random() < 0.02) {
-                    rotatePiece(wire);
-                    state.interactionsLeft--;
+            const allPipes = Array.from(document.querySelectorAll('.placed-pipe'));
+            
+            let foundWire = null;
+            for (const n of neighbors) {
+                const wire = allPipes.find(p => {
+                    const pPos = getPieceGridPosition(p);
+                    return pPos.x === n.nx && pPos.y === n.ny && PLAY_ROTATABLE_TYPES.includes(p.dataset.type);
+                });
+                if (wire) {
+                    foundWire = wire;
+                    break;
+                }
+            }
+
+            if (foundWire) {
+                // Determine if we should sabotaging (always if it's our target, otherwise chance)
+                let shouldSabotage = false;
+                if (state.targetPiece) {
+                    const tPos = getPieceGridPosition(state.targetPiece);
+                    // If near target, sabotage!
+                    if (Math.abs(gridPos.x - tPos.x) <= 1 && Math.abs(gridPos.y - tPos.y) <= 1) {
+                        shouldSabotage = true;
+                    }
+                } else {
+                    // Random sabotage while wandering
+                    if (Math.random() < 0.05 + (currentLevel * 0.05)) shouldSabotage = true;
+                }
+
+                if (shouldSabotage) {
+                    SFX.playSqueak();
+                    rotatePiece(foundWire);
                     state.lastSabotageAt = timestamp;
-                    state.movingUntil = timestamp; // Stop to munch/celebrate
-                    state.nextMoveAt = timestamp + 1500; 
+                    state.movingUntil = timestamp; // Stop to celebrate
+                    state.nextMoveAt = timestamp + 1000; 
                     state.stepsRemaining = 0;
+                    state.targetPiece = null; // Target reached and sabotaged
                     return;
                 }
             }
         }
 
         if (timestamp >= state.nextMoveAt) {
-            // Fluid Movement: Commit to a few steps in the same direction
+            // Speed is now constant as requested
+            const moveStepTime = MOUSE_NPC_STEP_MS;
+            
+            // Fluid Movement: Commit to a few steps
             if (state.stepsRemaining <= 0) {
-                const nextDirection = chooseMouseNpcDirection(piece, state.direction);
+                let targetPos = null;
+                if (state.targetPiece && state.targetPiece.parentNode) {
+                    targetPos = getPieceGridPosition(state.targetPiece);
+                } else {
+                    state.targetPiece = null;
+                }
+
+                const nextDirection = chooseMouseNpcDirection(piece, state.direction, targetPos);
                 if (nextDirection) {
                     state.direction = nextDirection.name;
                     state.stepsRemaining = 2 + Math.floor(Math.random() * 5); // Walk 2-6 tiles
@@ -843,8 +972,8 @@ function updateMouseNpcs(timestamp) {
                 const { x, y } = getPieceGridPosition(piece);
                 piece.style.left = `${(x + dirVec.dx) * GRID_SIZE}px`;
                 piece.style.top = `${(y + dirVec.dy) * GRID_SIZE}px`;
-                state.movingUntil = timestamp + MOUSE_NPC_STEP_MS;
-                state.nextMoveAt = timestamp + MOUSE_NPC_STEP_MS;
+                state.movingUntil = timestamp + moveStepTime;
+                state.nextMoveAt = timestamp + moveStepTime;
                 state.stepsRemaining--;
                 piece.dataset.rotation = MOUSE_DIRECTION_TO_ROTATION[state.direction];
             } else {
@@ -1049,9 +1178,7 @@ function updateBulbLights() {
         let focusY = mousePos.y;
 
         if (isInitialFocus) {
-            const entranceDoor = Array.from(document.querySelectorAll('.placed-pipe')).find(p => 
-                p.dataset.type === 'door' || p.dataset.type === 'door-metal'
-            );
+            const entranceDoor = document.querySelector('.placed-pipe[data-is-entrance="true"]');
             if (entranceDoor) {
                 focusX = parseFloat(entranceDoor.style.left) + GRID_SIZE / 2;
                 focusY = parseFloat(entranceDoor.style.top) - GRID_SIZE / 2; // Tile ABOVE the door
@@ -1083,6 +1210,40 @@ function updateBulbLights() {
         mouseGlow.setAttribute('fill', 'black');
         mouseGlow.setAttribute('fill-opacity', '0.55');
         mouseHolesGroup.appendChild(mouseGlow);
+
+        // --- NEW: Exit Door Spotlight ---
+        const exitDoor = document.querySelector('.placed-pipe[data-unlocked="true"]');
+        if (exitDoor) {
+            const exitX = parseFloat(exitDoor.style.left) + GRID_SIZE / 2;
+            const exitY = parseFloat(exitDoor.style.top) + GRID_SIZE * 1.5; // Tile BELOW the top door
+            
+            const snappedExitX = Math.floor(exitX / GRID_SIZE) * GRID_SIZE + GRID_SIZE / 2;
+            const snappedExitY = Math.floor(exitY / GRID_SIZE) * GRID_SIZE + GRID_SIZE / 2;
+            const exitCenterX = rect.left - areaRect.left + snappedExitX;
+            const exitCenterY = rect.top - areaRect.top + snappedExitY;
+            const exitSubX = Math.floor(snappedExitX / LIGHT_SUBCELL_SIZE);
+            const exitSubY = Math.floor(snappedExitY / LIGHT_SUBCELL_SIZE);
+            
+            const exitLight = buildLitSubcells(
+                exitSubX,
+                exitSubY,
+                MOUSE_LIGHT_RADIUS_SUBCELLS,
+                boardWidthTiles,
+                boardHeightTiles,
+                occluderMap
+            );
+
+            appendQuantizedLightBands(mouseHolesGroup, exitLight.surfaceCells, rect, areaRect, MOUSE_LIGHT_RADIUS_SUBCELLS, 0.18, 0.08, 10);
+            appendQuantizedLightBands(mouseHolesGroup, exitLight.openCells, rect, areaRect, MOUSE_LIGHT_RADIUS_SUBCELLS, 0.9, 0.16, 8);
+
+            const exitGlow = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+            exitGlow.setAttribute('cx', exitCenterX);
+            exitGlow.setAttribute('cy', exitCenterY);
+            exitGlow.setAttribute('r', GRID_SIZE * 0.7);
+            exitGlow.setAttribute('fill', 'black');
+            exitGlow.setAttribute('fill-opacity', '0.55');
+            mouseHolesGroup.appendChild(exitGlow);
+        }
     }
 
     if (bulbHolesGroup) {
@@ -1273,6 +1434,34 @@ function startDragging(piece, e) {
 }
 
 window.addEventListener('mousemove', (e) => {
+    if (gameMode === 'play') {
+        const rect = board.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+
+        if (isInitialFocus) {
+            const entranceDoor = document.querySelector('.placed-pipe[data-is-entrance="true"]');
+            if (entranceDoor) {
+                const dx = parseFloat(entranceDoor.style.left) + GRID_SIZE / 2;
+                const dy = parseFloat(entranceDoor.style.top) - GRID_SIZE / 2;
+                const dist = Math.hypot(mx - dx, my - dy);
+                if (dist < 80) isInitialFocus = false; // Larger radius for reliability
+            } else {
+                isInitialFocus = false;
+            }
+        }
+
+        // Reliable Hint Removal for Level 2
+        if (!isInitialFocus) {
+            const hint = document.getElementById('tutorial-hint');
+            if (hint && (currentLevel === 2 || hint.innerText.includes('mouse'))) {
+                hint.remove();
+            }
+        }
+
+        mousePos.x = mx;
+        mousePos.y = my;
+    }
     if (isDragging && draggedPiece) {
         movePiece(e.clientX, e.clientY);
     }
@@ -1292,10 +1481,12 @@ window.addEventListener('mouseup', (e) => {
 
 function movePiece(clientX, clientY) {
     const boardRect = board.getBoundingClientRect();
-
-    let x = clientX - boardRect.left - offsetX;
-    let y = clientY - boardRect.top - offsetY;
-
+    const editorMode = document.getElementById('game-viewport').classList.contains('editor-mode');
+    const scale = editorMode ? 0.74 : 1;
+    
+    const x = Math.round(((clientX - boardRect.left) / scale - offsetX) / GRID_SIZE) * GRID_SIZE;
+    const y = Math.round(((clientY - boardRect.top) / scale - offsetY) / GRID_SIZE) * GRID_SIZE;
+    
     draggedPiece.style.left = `${x}px`;
     draggedPiece.style.top = `${y}px`;
 }
@@ -1313,8 +1504,8 @@ function snapToGrid(piece) {
     if (
         snapX < -GRID_SIZE / 2 ||
         snapY < -GRID_SIZE / 2 ||
-        snapX > boardRect.width - GRID_SIZE / 2 ||
-        snapY > boardRect.height - GRID_SIZE / 2
+        snapX > 1250 - GRID_SIZE / 2 ||
+        snapY > 700 - GRID_SIZE / 2
     ) {
         piece.remove();
         if (selectedPiece === piece) selectedPiece = null;
@@ -1414,12 +1605,22 @@ board.addEventListener('dblclick', (e) => {
     }
 });
 
-// Single click to rotate (Play Mode)
 board.addEventListener('click', (e) => {
-    if (gameMode !== 'play') return;
     const target = e.target.closest('.placed-pipe');
-    if (target && PLAY_ROTATABLE_TYPES.includes(target.dataset.type)) {
-        rotatePiece(target);
+    if (!target) return;
+
+    if (gameMode === 'play') {
+        if (PLAY_ROTATABLE_TYPES.includes(target.dataset.type)) {
+            rotatePiece(target);
+        } else if (target.dataset.type === 'switch') {
+            SFX.playClick();
+            toggleSwitch(target);
+        }
+    } else if (gameMode === 'editor') {
+        if (target.dataset.type === 'switch') {
+            SFX.playClick();
+            toggleSwitch(target);
+        }
     }
 });
 
@@ -1516,7 +1717,9 @@ function updateCircuit() {
 
     pieces.forEach(p => {
         if (p.dataset.type === 'bulb' || p.dataset.type === 'inline-bulb') {
+            const wasLit = p.classList.contains('lit');
             p.classList.remove('lit');
+            p.dataset.wasLit = wasLit; // Track for sound
         }
         // Full reset of all sparks on every frame to prevent "ghost" sparks
         p.querySelectorAll('.wire-spark').forEach(spark => {
@@ -1660,6 +1863,54 @@ function updateCircuit() {
     if (gameMode === 'play' && topSocket && powered.has(topSocket)) {
         unlockExitDoor();
     }
+
+    // Handle bulb sounds and state
+    pieces.forEach(p => {
+        if (p.dataset.type === 'bulb' || p.dataset.type === 'inline-bulb') {
+            const isLit = p.classList.contains('lit');
+            const wasLit = p.dataset.wasLit === 'true';
+            if (isLit && !wasLit) {
+                SFX.playTone(120, 'sawtooth', 0.15, 0.04); // Hum On
+                
+                // --- Targeted Sabotage Assignment ---
+                // Find nearest mouse without a target
+                const mice = Array.from(document.querySelectorAll(`.placed-pipe[data-type="${MOUSE_NPC_TYPE}"]`));
+                const bPos = getPieceGridPosition(p);
+                
+                let bestMouse = null;
+                let minDist = Infinity;
+                
+                mice.forEach(m => {
+                    const mState = mouseNpcStates.get(m);
+                    if (!mState || mState.targetPiece) return;
+                    
+                    const mPos = getPieceGridPosition(m);
+                    const dist = Math.hypot(mPos.x - bPos.x, mPos.y - bPos.y);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        bestMouse = m;
+                    }
+                });
+                
+                if (bestMouse) {
+                    const state = mouseNpcStates.get(bestMouse);
+                    state.targetPiece = p;
+                    state.stepsRemaining = 0; // Force redirection
+                }
+            } else if (!isLit && wasLit) {
+                SFX.playTone(100, 'sawtooth', 0.1, 0.02); // Hum Off
+                
+                // Clear any mice targeting this bulb
+                const mice = Array.from(document.querySelectorAll(`.placed-pipe[data-type="${MOUSE_NPC_TYPE}"]`));
+                mice.forEach(m => {
+                    const mState = mouseNpcStates.get(m);
+                    if (mState && mState.targetPiece === p) {
+                        mState.targetPiece = null;
+                    }
+                });
+            }
+        }
+    });
 
     // NEW: Update bulb light mask after circuit state changes
     if (gameMode === 'play') {
