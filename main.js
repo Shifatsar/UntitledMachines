@@ -1,7 +1,18 @@
-import { LEVELS } from './levels.js';
+import { LEVELS } from './levels.js?v=30';
 const board = document.getElementById('board-inner');
 const gameArea = document.getElementById('game-viewport');
 const paletteItems = document.querySelectorAll('.pipe-item');
+// Wavedash SDK Initialization
+if (window.WavedashJS) {
+    try {
+        // Corrected casing to .init()
+        window.WavedashJS.init();
+        console.log("Wavedash SDK Initialized");
+    } catch (e) {
+        console.error("Wavedash init Error:", e);
+    }
+}
+
 const GRID_SIZE = 50; // Updated grid size
 const PLAY_ROTATABLE_TYPES = ['straight', 'curve', 'tshape', 'cross'];
 const MOUSE_NPC_TYPE = 'mouse-npc';
@@ -78,6 +89,7 @@ const btnStart = document.getElementById('btn-start');
 const btnClearBoard = document.getElementById('btn-clear-board');
 const editorLevelButtons = document.getElementById('editor-level-buttons');
 const btnExportAll = document.getElementById('btn-export-all');
+const btnDownloadLevels = document.getElementById('btn-download-levels');
 const btnLevelSelect = document.getElementById('btn-level-select');
 const levelSelectMenu = document.getElementById('level-select-menu');
 const btnLevelBack = document.getElementById('btn-level-back');
@@ -93,10 +105,14 @@ let selectedPiece = null;
 let gameMode = 'editor'; // 'editor' or 'play'
 let currentLevel = 1;
 let mouseNpcStates = new WeakMap();
+let heldBox = null;
+let heldBoxEl = null;
 
 // UI Elements (continued)
 const creditsMenu = document.getElementById('credits-menu');
 const btnCreditsBack = document.getElementById('btn-credits-back');
+const splash = document.getElementById('level-splash');
+const splashText = document.getElementById('splash-level-text');
 
 
 document.getElementById('bg-select').addEventListener('change', (e) => {
@@ -140,7 +156,7 @@ function checkSaves() {
     // Populate editor level buttons (1-10)
     if (editorLevelButtons) {
         editorLevelButtons.innerHTML = '';
-        for (let i = 1; i <= 10; i++) {
+        for (let i = 1; i <= 8; i++) {
             const btn = document.createElement('button');
             btn.className = 'editor-lvl-btn';
             btn.textContent = i;
@@ -176,7 +192,29 @@ function checkSaves() {
 
 if (btnExportAll) {
     btnExportAll.addEventListener('click', () => {
-        const allLevels = {};
+        // Merge hardcoded LEVELS with localStorage drafts
+        const allLevels = typeof LEVELS !== 'undefined' ? { ...LEVELS } : {};
+        
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key.startsWith('level_')) {
+                const lvl = key.replace('level_', '');
+                allLevels[lvl] = JSON.parse(localStorage.getItem(key));
+            }
+        }
+        
+        const json = JSON.stringify(allLevels, null, 4);
+        const code = `export const LEVELS = ${json};`;
+        
+        navigator.clipboard.writeText(code).then(() => {
+            alert("Permanent level code copied! Paste the entire content into your levels.js file.");
+        });
+    });
+}
+
+if (btnDownloadLevels) {
+    btnDownloadLevels.addEventListener('click', () => {
+        const allLevels = typeof LEVELS !== 'undefined' ? { ...LEVELS } : {};
         for (let i = 0; i < localStorage.length; i++) {
             const key = localStorage.key(i);
             if (key.startsWith('level_')) {
@@ -185,14 +223,27 @@ if (btnExportAll) {
             }
         }
         const json = JSON.stringify(allLevels, null, 4);
-        navigator.clipboard.writeText(json).then(() => {
-            alert("All browser levels copied as JSON! Paste this into levels.js to save them permanently.");
-        });
+        const code = `export const LEVELS = ${json};`;
+        
+        const blob = new Blob([code], { type: 'text/javascript' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'levels.js';
+        a.click();
+        URL.revokeObjectURL(url);
     });
 }
 
 // Initial check
 checkSaves();
+
+// Signal Wavedash that we are loaded
+if (window.WavedashJS) {
+    try {
+        window.WavedashJS.updateLoadProgressZeroToOne(1.0);
+    } catch (e) {}
+}
 
 btnBuild.addEventListener('click', () => {
     mainMenu.classList.add('hidden');
@@ -406,6 +457,29 @@ function startGameMode() {
         document.getElementById('game-viewport').appendChild(hint);
     }
 
+    if (currentLevel === 3) {
+        const hint = document.createElement('div');
+        hint.id = 'tutorial-hint';
+        hint.innerHTML = 'There might be a way to stop Mr. Mouse for a bit... Look around';
+        hint.style.cssText = `
+            position: absolute;
+            left: 100px;
+            top: 250px;
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 24px;
+            font-weight: bold;
+            pointer-events: none;
+            z-index: 10000;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            width: 500px;
+            text-align: center;
+            font-family: 'Inter', sans-serif;
+            text-shadow: 0 0 10px rgba(255,255,255,0.3);
+        `;
+        document.getElementById('game-viewport').appendChild(hint);
+    }
+
     if (currentLevel === 2) {
         const hint = document.createElement('div');
         hint.id = 'tutorial-hint';
@@ -520,8 +594,6 @@ btnStart.addEventListener('click', () => {
         document.getElementById('btn-exit-game').classList.remove('hidden');
         
         // Show Splash for Level 1
-        const splash = document.getElementById('level-splash');
-        const splashText = document.getElementById('splash-level-text');
         splashText.innerText = `LEVEL ${currentLevel}`;
         splash.classList.remove('hidden');
         setTimeout(() => {
@@ -558,7 +630,7 @@ function openLevelSelect() {
 
     const highest = parseInt(localStorage.getItem('highest_unlocked_level')) || 1;
 
-    for (let i = 1; i <= 10; i++) {
+    for (let i = 1; i <= 8; i++) {
         const slot = document.createElement('div');
         slot.className = 'level-slot';
         slot.textContent = i;
@@ -714,27 +786,7 @@ function applyPieceTransform(piece) {
     piece.style.transform = `rotate(${parseInt(piece.dataset.rotation) || 0}deg) scaleX(${flip})`;
 }
 
-function ensureSparkOverlay(exposedElement) {
-    const baseDir = exposedElement.getAttribute('data-dir');
-    if (!baseDir || !exposedElement.parentNode) return null;
 
-    const parent = exposedElement.parentNode;
-    let spark = parent.querySelector(`.wire-spark[data-dir="${baseDir}"]`);
-    if (spark) return spark;
-
-    spark = document.createElementNS("http://www.w3.org/2000/svg", "use");
-    spark.setAttribute('href', '#wire-sparks');
-    spark.setAttribute('class', 'wire-spark');
-    spark.setAttribute('data-dir', baseDir);
-
-    const transform = exposedElement.getAttribute('transform');
-    if (transform) {
-        spark.setAttribute('transform', transform);
-    }
-
-    exposedElement.insertAdjacentElement('afterend', spark);
-    return spark;
-}
 
 function shuffleArray(values) {
     const copy = [...values];
@@ -856,6 +908,8 @@ function updateMouseNpcs(timestamp) {
     const maxInteractions = currentLevelData.mouseInteractions ?? 0;
 
     Array.from(document.querySelectorAll(`.placed-pipe[data-type="${MOUSE_NPC_TYPE}"]`)).forEach(piece => {
+        if (piece.dataset.trapped === "true") return; // Skip if trapped
+        
         let state = mouseNpcStates.get(piece);
         if (!state) {
             const direction = getMouseDirectionFromRotation(parseInt(piece.dataset.rotation) || 0);
@@ -875,15 +929,18 @@ function updateMouseNpcs(timestamp) {
         const gridPos = getPieceGridPosition(piece);
         // Sabotage Frequency: Scaled by level as requested
         // Level 2: 1200ms, Level 3: 1000ms, Level 5: 300ms, Level 9+: 150ms
-        let sabotageCooldown = 3000; // Default fallback
-        if (currentLevel === 2) sabotageCooldown = 1200;
-        else if (currentLevel === 3) sabotageCooldown = 1000;
-        else if (currentLevel === 4) sabotageCooldown = 600;
-        else if (currentLevel === 5) sabotageCooldown = 300;
-        else if (currentLevel === 6) sabotageCooldown = 250;
-        else if (currentLevel === 7) sabotageCooldown = 200;
-        else if (currentLevel === 8) sabotageCooldown = 175;
-        else if (currentLevel >= 9) sabotageCooldown = 150;
+        // Sabotage Frequency: Manually tuned progression
+        let sabotageCooldown = 2000; // Default fallback
+        
+        if (currentLevel === 1) sabotageCooldown = 999999; 
+        else if (currentLevel === 2) sabotageCooldown = 4000;
+        else if (currentLevel === 3) sabotageCooldown = 3500;
+        else if (currentLevel === 4) sabotageCooldown = 3000;
+        else if (currentLevel === 5) sabotageCooldown = 500;
+        else if (currentLevel === 6) sabotageCooldown = 2000;
+        else if (currentLevel === 7 || currentLevel === 8) sabotageCooldown = 1000;
+        else if (currentLevel === 9) sabotageCooldown = 750;
+        else if (currentLevel >= 10) sabotageCooldown = 500;
 
         // Sabotage Logic: Sniff out wires
         if (timestamp - (state.lastSabotageAt || 0) > sabotageCooldown) {
@@ -911,17 +968,14 @@ function updateMouseNpcs(timestamp) {
             }
 
             if (foundWire) {
-                // Determine if we should sabotaging (always if it's our target, otherwise chance)
                 let shouldSabotage = false;
                 if (state.targetPiece) {
                     const tPos = getPieceGridPosition(state.targetPiece);
-                    // If near target, sabotage!
-                    if (Math.abs(gridPos.x - tPos.x) <= 1 && Math.abs(gridPos.y - tPos.y) <= 1) {
+                    // If near target (within 3 tiles), sabotage!
+                    const dist = Math.hypot(gridPos.x - tPos.x, gridPos.y - tPos.y);
+                    if (dist <= 3) {
                         shouldSabotage = true;
                     }
-                } else {
-                    // Random sabotage while wandering
-                    if (Math.random() < 0.05 + (currentLevel * 0.05)) shouldSabotage = true;
                 }
 
                 if (shouldSabotage) {
@@ -1331,9 +1385,12 @@ function checkWinCondition() {
 function winLevel() {
     gameMode = 'editor'; // Pause loop
     
-    const splash = document.getElementById('level-splash');
-    const splashText = document.getElementById('splash-level-text');
-    
+    // Check if next level exists BEFORE showing splash
+    if (!LEVELS[currentLevel + 1]) {
+        runEndGameSequence();
+        return;
+    }
+
     // Step 1: Show Splash
     splash.classList.remove('hidden');
     setTimeout(() => {
@@ -1361,14 +1418,40 @@ function winLevel() {
                 }, 600);
             }, 1200);
         } else {
-            // No more levels
-            document.getElementById('btn-exit-game').classList.add('hidden');
-            editorUI.classList.add('hidden');
-            creditsMenu.classList.remove('hidden');
-            splash.classList.remove('active');
-            splash.classList.add('hidden');
+            // No more levels: Run cinematic end sequence
+            runEndGameSequence();
         }
     }, 600);
+}
+
+function runEndGameSequence() {
+    // Hide UI elements
+    document.getElementById('btn-exit-game').classList.add('hidden');
+    if (editorUI) editorUI.classList.add('hidden');
+    
+    // Clear the board for the final fade
+    board.innerHTML = '';
+    board.style.background = '#000';
+
+    // Show Credits Overlay
+    creditsMenu.classList.remove('hidden');
+    if (splash) {
+        splash.classList.remove('active');
+        splash.classList.add('hidden');
+    }
+
+    const winAnn = document.getElementById('win-announcement');
+    const scroll = document.getElementById('credits-scroll');
+
+    // Sequence 1: Win Announcement (5 seconds)
+    winAnn.classList.remove('hidden');
+    scroll.classList.add('hidden');
+
+    setTimeout(() => {
+        // Sequence 2: Fade to black and Roll Credits
+        winAnn.classList.add('hidden');
+        scroll.classList.remove('hidden');
+    }, 5000);
 }
 
 // --- Drag & Drop Editor Logic ---
@@ -1451,16 +1534,22 @@ window.addEventListener('mousemove', (e) => {
             }
         }
 
-        // Reliable Hint Removal for Level 2
+        // Reliable Hint Removal for Level 2 & 3
         if (!isInitialFocus) {
             const hint = document.getElementById('tutorial-hint');
-            if (hint && (currentLevel === 2 || hint.innerText.includes('mouse'))) {
+            if (hint && (currentLevel === 2 || currentLevel === 3 || hint.innerText.includes('mouse'))) {
                 hint.remove();
             }
         }
 
         mousePos.x = mx;
         mousePos.y = my;
+
+        // Update held box position
+        if (heldBoxEl) {
+            heldBoxEl.style.left = `${e.clientX - 25}px`;
+            heldBoxEl.style.top = `${e.clientY - 25}px`;
+        }
     }
     if (isDragging && draggedPiece) {
         movePiece(e.clientX, e.clientY);
@@ -1608,13 +1697,56 @@ board.addEventListener('dblclick', (e) => {
 board.addEventListener('click', (e) => {
     const target = e.target.closest('.placed-pipe');
     if (!target) return;
+    if (!target && !heldBoxEl) return;
 
     if (gameMode === 'play') {
-        if (PLAY_ROTATABLE_TYPES.includes(target.dataset.type)) {
+        if (target && PLAY_ROTATABLE_TYPES.includes(target.dataset.type)) {
             rotatePiece(target);
-        } else if (target.dataset.type === 'switch') {
+        } else if (target && target.dataset.type === 'switch') {
             SFX.playClick();
             toggleSwitch(target);
+        } else if (target && target.dataset.type === 'box' && !heldBoxEl) {
+            // Pick up box
+            heldBox = target;
+            target.style.visibility = 'hidden';
+            heldBoxEl = document.createElement('div');
+            heldBoxEl.className = 'box-held';
+            heldBoxEl.style.left = `${e.clientX - 25}px`;
+            heldBoxEl.style.top = `${e.clientY - 25}px`;
+            document.body.appendChild(heldBoxEl);
+            SFX.playClick();
+        } else if (heldBoxEl) {
+            // We are holding a box, try to trap a mouse
+            const mice = Array.from(document.querySelectorAll(`.placed-pipe[data-type="${MOUSE_NPC_TYPE}"]`));
+            const rect = board.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+            
+            const targetMouse = mice.find(m => {
+                const mX = parseFloat(m.style.left) + GRID_SIZE / 2;
+                const mY = parseFloat(m.style.top) + GRID_SIZE / 2;
+                return Math.hypot(mX - mx, mY - my) < 40;
+            });
+
+            if (targetMouse) {
+                trapMouse(targetMouse);
+                // Remove held box visual
+                heldBoxEl.remove();
+                heldBoxEl = null;
+                heldBox.remove();
+                heldBox = null;
+            } else {
+                // Drop box back
+                const dropX = Math.round((mx - GRID_SIZE/2) / GRID_SIZE) * GRID_SIZE;
+                const dropY = Math.round((my - GRID_SIZE/2) / GRID_SIZE) * GRID_SIZE;
+                heldBox.style.left = `${dropX}px`;
+                heldBox.style.top = `${dropY}px`;
+                heldBox.style.visibility = 'visible';
+                heldBoxEl.remove();
+                heldBoxEl = null;
+                heldBox = null;
+                SFX.playClick();
+            }
         }
     } else if (gameMode === 'editor') {
         if (target.dataset.type === 'switch') {
@@ -1623,6 +1755,56 @@ board.addEventListener('click', (e) => {
         }
     }
 });
+
+function trapMouse(mouse) {
+    const x = mouse.style.left;
+    const y = mouse.style.top;
+    
+    // Hide mouse
+    mouse.style.visibility = 'hidden';
+    mouse.dataset.trapped = "true";
+    
+    // Create trapped box visual
+    const trappedBox = document.createElement('div');
+    trappedBox.className = 'trapped-box';
+    trappedBox.style.left = x;
+    trappedBox.style.top = y;
+    board.appendChild(trappedBox);
+    
+    SFX.playSqueak();
+    
+    // Trap for 10 seconds
+    setTimeout(() => {
+        trappedBox.remove();
+        mouse.style.visibility = 'visible';
+        delete mouse.dataset.trapped;
+        
+        // Re-create the box piece at this location so it can be used again
+        const newBox = document.createElement('div');
+        newBox.className = 'placed-pipe';
+        newBox.dataset.type = 'box';
+        newBox.style.left = x;
+        newBox.style.top = y;
+        
+        // Create the box image inside
+        const img = document.createElement('img');
+        img.src = 'box.png';
+        img.style.width = '40px';
+        img.style.height = '40px';
+        img.style.imageRendering = 'pixelated';
+        img.style.pointerEvents = 'none';
+        img.style.marginTop = '5px';
+        img.style.marginLeft = '5px';
+        newBox.appendChild(img);
+        
+        board.appendChild(newBox);
+        
+        // Escaping effect: move mouse randomly
+        const state = mouseNpcStates.get(mouse);
+        if (state) state.nextMoveAt = 0; // Move immediately
+        SFX.playSqueak();
+    }, 10000);
+}
 
 // --- Autotiling Wires Logic ---
 function updateWires() {
@@ -1671,15 +1853,6 @@ function updateWires() {
                 el.style.visibility = 'visible';
             }
 
-            const spark = ensureSparkOverlay(el);
-            if (spark) {
-                const isHidden = (el.style.visibility === 'hidden' || el.style.opacity === '0');
-                spark.style.opacity = isHidden ? '0' : '1';
-                spark.style.visibility = isHidden ? 'hidden' : 'visible';
-                if (isHidden) {
-                    spark.classList.remove('live');
-                }
-            }
         });
     });
 
@@ -1721,12 +1894,6 @@ function updateCircuit() {
             p.classList.remove('lit');
             p.dataset.wasLit = wasLit; // Track for sound
         }
-        // Full reset of all sparks on every frame to prevent "ghost" sparks
-        p.querySelectorAll('.wire-spark').forEach(spark => {
-            spark.classList.remove('live');
-            spark.style.opacity = '0';
-            spark.style.visibility = 'hidden';
-        });
         if (p.dataset.type === 'wall-socket') {
             const light = p.querySelector('.socket-light');
             if (light) light.setAttribute('fill', '#d63031');
@@ -1816,52 +1983,10 @@ function updateCircuit() {
             const light = p.querySelector('.socket-light');
             if (light) light.setAttribute('fill', '#00b894');
         }
-
-        // Don't spark on batteries or sockets
-        if (p.dataset.type === 'battery' || p.dataset.type === 'wall-socket') return;
-
-        let px = parseFloat(p.style.left) || 0;
-        let py = parseFloat(p.style.top) || 0;
-        let pgx = Math.round(px / GRID_SIZE) + 0;
-        let pgy = Math.round(py / GRID_SIZE) + 0;
-
-        const portData = getGlobalPorts(p);
-        portData.forEach(port => {
-            const angle = port.angle;
-            const exposedElement = port.el;
-            const spark = ensureSparkOverlay(exposedElement);
-            if (!spark) return;
-
-            let nx = pgx, ny = pgy;
-            if (angle === 0) ny -= 1;
-            else if (angle === 90) nx += 1;
-            else if (angle === 180) ny += 1;
-            else if (angle === 270) nx -= 1;
-
-            const neighborCell = grid[`${nx},${ny}`];
-            let isConnected = false;
-            if (neighborCell) {
-                const neighborPorts = neighborCell.ports.map(pd => pd.angle);
-                const oppositeAngle = normalizeRotation(angle + 180);
-                if (neighborPorts.includes(oppositeAngle)) {
-                    isConnected = true;
-                }
-            }
-
-            if (!isConnected) {
-                spark.classList.add('live');
-                spark.style.opacity = '1';
-                spark.style.visibility = 'visible';
-            } else {
-                spark.classList.remove('live');
-                spark.style.opacity = '0';
-                spark.style.visibility = 'hidden';
-            }
-        });
     });
 
-    if (gameMode === 'play' && topSocket && powered.has(topSocket)) {
-        unlockExitDoor();
+    if (gameMode === 'play') {
+        updateExitDoorStatus(topSocket && powered.has(topSocket));
     }
 
     // Handle bulb sounds and state
@@ -1869,11 +1994,16 @@ function updateCircuit() {
         if (p.dataset.type === 'bulb' || p.dataset.type === 'inline-bulb') {
             const isLit = p.classList.contains('lit');
             const wasLit = p.dataset.wasLit === 'true';
+
             if (isLit && !wasLit) {
                 SFX.playTone(120, 'sawtooth', 0.15, 0.04); // Hum On
-                
+            } else if (!isLit && wasLit) {
+                SFX.playTone(100, 'sawtooth', 0.1, 0.02); // Hum Off
+            }
+
+            if (isLit) {
                 // --- Targeted Sabotage Assignment ---
-                // Find nearest mouse without a target
+                // Continuously find nearest idle mouse for this lit bulb
                 const mice = Array.from(document.querySelectorAll(`.placed-pipe[data-type="${MOUSE_NPC_TYPE}"]`));
                 const bPos = getPieceGridPosition(p);
                 
@@ -1882,7 +2012,7 @@ function updateCircuit() {
                 
                 mice.forEach(m => {
                     const mState = mouseNpcStates.get(m);
-                    if (!mState || mState.targetPiece) return;
+                    if (!mState || mState.targetPiece || m.dataset.trapped === "true") return;
                     
                     const mPos = getPieceGridPosition(m);
                     const dist = Math.hypot(mPos.x - bPos.x, mPos.y - bPos.y);
@@ -1918,7 +2048,7 @@ function updateCircuit() {
     }
 }
 
-function unlockExitDoor() {
+function updateExitDoorStatus(isPowered) {
     const doors = Array.from(document.querySelectorAll('.placed-pipe')).filter(p => p.dataset.type === 'door' || p.dataset.type === 'door-metal');
     if (doors.length === 0) return;
 
@@ -1926,10 +2056,20 @@ function unlockExitDoor() {
     doors.sort((a, b) => parseFloat(a.style.top) - parseFloat(b.style.top));
     const topDoor = doors[0];
 
-    if (topDoor && !topDoor.classList.contains('door-unlocking')) {
-        topDoor.classList.add('door-unlocking');
-        // Optional: remove after animation? No, just keep it non-collidable
-        topDoor.dataset.unlocked = "true";
+    if (!topDoor) return;
+
+    if (isPowered) {
+        if (!topDoor.classList.contains('door-unlocking')) {
+            topDoor.classList.remove('door-locking');
+            topDoor.classList.add('door-unlocking');
+            topDoor.dataset.unlocked = "true";
+        }
+    } else {
+        if (topDoor.classList.contains('door-unlocking')) {
+            topDoor.classList.remove('door-unlocking');
+            topDoor.classList.add('door-locking');
+            topDoor.dataset.unlocked = "false";
+        }
     }
 }
 

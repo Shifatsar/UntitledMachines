@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>THE GRID</title>
-    <link rel="stylesheet" href="style.css?v=18">
+    <link rel="stylesheet" href="style.css?v=30">
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800;900&family=Silkscreen:wght@400;700&display=swap" rel="stylesheet">
 </head>
 <body>
@@ -16,13 +16,7 @@
             <path d="M 50 0 Q 52 -12 50 -25" fill="none" stroke="#d63031" stroke-width="4" stroke-linecap="round"/>
             <path d="M 58 0 Q 60 -10 65 -15" fill="none" stroke="#00b894" stroke-width="4" stroke-linecap="round"/>
         </g>
-        <g id="wire-sparks">
-            <line x1="44" y1="-8" x2="36" y2="-18" stroke="#fff6a8" stroke-width="2.5" stroke-linecap="round"/>
-            <line x1="50" y1="-10" x2="50" y2="-24" stroke="#ffe66d" stroke-width="2.5" stroke-linecap="round"/>
-            <line x1="56" y1="-8" x2="64" y2="-18" stroke="#fff6a8" stroke-width="2.5" stroke-linecap="round"/>
-            <line x1="46" y1="-18" x2="40" y2="-28" stroke="#ffd32a" stroke-width="1.8" stroke-linecap="round"/>
-            <line x1="54" y1="-18" x2="60" y2="-28" stroke="#ffd32a" stroke-width="1.8" stroke-linecap="round"/>
-        </g>
+
         <linearGradient id="waterGrad" x1="0%" y1="0%" x2="100%" y2="100%">
           <stop offset="0%" stop-color="#00c6ff" />
           <stop offset="100%" stop-color="#0072ff" />
@@ -61,7 +55,7 @@
                 <h1>THE GRID</h1>
                 <button id="btn-start" class="menu-btn primary">Start Adventure</button>
                 <button id="btn-level-select" class="menu-btn">Select Level</button>
-                <button id="btn-build" class="menu-btn">Level Maker</button>
+                <button id="btn-build" class="menu-btn hidden">Level Maker</button>
             </div>
         </div>
      
@@ -77,14 +71,28 @@
         </div>
      
         <!-- Credits Overlay -->
-        <div id="credits-menu" class="overlay hidden">
-            <div class="menu-box">
-                <h1>THE GRID</h1>
-                <p style="font-size: 1.5em; color: #00c6ff; font-weight: 800; letter-spacing: 2px;">YOU ESCAPED!</p>
-                <p style="font-size: 0.9em; color: #94a3b8; margin-bottom: 20px;">All connections completed. The machines are operational.</p>
-                <button id="btn-credits-back" class="menu-btn primary">Main Menu</button>
+    <div id="credits-menu" class="overlay hidden">
+        <!-- Sequence 1: Win Announcement -->
+        <div id="win-announcement" class="hidden" style="font-family: 'Silkscreen', cursive;">
+            <h1 style="font-size: 4rem; letter-spacing: 4px; color: #fff; margin: 0;">GAME OVER</h1>
+            <p style="font-size: 1.5rem; color: #fff; text-align: center; margin-top: 10px; letter-spacing: 2px;">YOU WIN</p>
+        </div>
+
+        <!-- Sequence 2: Scrolling Credits -->
+        <div id="credits-scroll" class="hidden" style="position: relative; height: 100%; width: 100%; overflow: hidden; font-family: 'Outfit', sans-serif;">
+            <div class="credits-content">
+                <div style="margin-bottom: 100px;"></div>
+                <p class="credits-title">Developed by</p>
+                <p class="credits-name">Chickan</p>
+                
+                <div style="margin-bottom: 200px;"></div>
+                <p style="color: #475569; font-size: 0.8rem; letter-spacing: 1px;">THANK YOU FOR PLAYING</p>
+                
+                <div style="margin-bottom: 500px;"></div>
+                <button id="btn-credits-back" class="menu-btn primary" style="margin: 0 auto;">Main Menu</button>
             </div>
         </div>
+    </div>
     
         <!-- Level Editor UI -->
         <div id="editor-ui" class="hidden">
@@ -97,7 +105,8 @@
                     <input type="number" id="level-input" min="1" max="100" value="1" placeholder="Lvl">
                     <button id="btn-save">Save Current</button>
                 </div>
-                <button id="btn-export-all" style="width: 100%; margin-top: 5px; margin-bottom: 20px; background: #8e44ad; font-size: 0.8em; padding: 8px;">Copy All Levels (for levels.js)</button>
+                <button id="btn-export-all" style="width: 100%; margin-top: 5px; background: #8e44ad; font-size: 0.8em; padding: 8px;">Copy All Levels (for levels.js)</button>
+                <button id="btn-download-levels" style="width: 100%; margin-top: 5px; margin-bottom: 20px; background: #2980b9; font-size: 0.8em; padding: 8px;">Download levels.js</button>
     
                 <h3>Palette</h3>
                 
@@ -288,6 +297,10 @@
                         <div class="pipe-item" data-type="mouse-npc">
                             <div class="mouse-npc-sprite" style="width: 50px; height: 50px; background-image: url('mouse_down.png'); background-size: 400% 100%; background-position: 0% 0%;"></div>
                             <span>MOUSE</span>
+                        </div>
+                        <div class="pipe-item" data-type="box">
+                            <img src="box.png" width="40" height="40" style="image-rendering: pixelated; margin-bottom: 5px;">
+                            <span>BOX</span>
                         </div>
                     </div>
                 </div>
@@ -522,6 +535,6 @@
     </div>
 
 
-    <script type="module" src="main.js?v=28"></script>
+    <script type="module" src="main.js?v=30"></script>
 </body>
 </html>
